@@ -1,3 +1,5 @@
+![kicks](.github/preview.png)
+
 # 🎸 Kicks Guitar Workstation
 
 [![CI](https://github.com/synthalorian/kicks/actions/workflows/ci.yml/badge.svg)](https://github.com/synthalorian/kicks/actions/workflows/ci.yml)
