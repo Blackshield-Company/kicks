@@ -1,3 +1,5 @@
+![kicks](.github/preview.png)
+
 # 🎸 Kicks Guitar Workstation
 
 [![CI](https://github.com/synthalorian/kicks/actions/workflows/ci.yml/badge.svg)](https://github.com/synthalorian/kicks/actions/workflows/ci.yml)
@@ -215,5 +217,4 @@ The CI `release` job will automatically build and upload `.AppImage`, `.deb`, `.
 
 ---
 
-**Made by synth with blackclaw** ⚫🦞
 

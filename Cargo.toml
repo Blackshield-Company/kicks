@@ -29,6 +29,6 @@ walkdir = "2"
 midir = "0.10"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 cpal = "0.17"
-ringbuf = "0.4"
+ringbuf = "0.5"
 rustfft = "6"
 realfft = "3"

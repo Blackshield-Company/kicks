@@ -13,7 +13,6 @@ Existing Tauri 2 + Svelte + Rust codebase. Do not introduce new frameworks.
 
 ## House Rules (non-negotiable)
 
-- **Authorship credit:** README/docs footer is `Made by synth with blackclaw ⚫🦞` — synth first, always. Never "heavy lifting by blackclaw", never sole-author credit.
 - **Theme:** Blackshield (steel+blood: bg #101014, surface #16161C, text #D8D3C8, accent #C1121F) is the DEFAULT everywhere. Other palettes (incl. Synthwave '84) stay opt-in/selectable. See the blackshield-theme skill for the full token set.
 - **CLI naming:** the binary is the bare project name. Never a `-cli` suffix.
 - **Commits:** conventional commits (`feat:`, `fix:`, `chore:`...). Local commits are fine.
