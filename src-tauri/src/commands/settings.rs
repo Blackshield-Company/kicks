@@ -186,8 +186,12 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
                     }));
                     if let Some(ref mut io) = *jack_io {
                         let cpu_load = Arc::clone(&state.cpu_load);
-                        io.start(eng_arc.clone(), Some(cpu_load))
-                            .map_err(|e| format!("Failed to restart JACK: {}", e))?;
+                        {
+                            let (param_tx, param_rx) = param_channel();
+                            *state.param_tx.lock().map_err(|e| e.to_string())? = Some(param_tx);
+                            io.start(eng_arc.clone(), param_rx, Some(cpu_load))
+                        }
+                        .map_err(|e| format!("Failed to restart JACK: {}", e))?;
                     }
                 }
                 AudioBackend::Cpal => {

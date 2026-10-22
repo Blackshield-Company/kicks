@@ -19,6 +19,29 @@ pub trait AudioEngine: Send {
     fn set_parameter(&mut self, id: &str, value: f32);
 }
 
+/// Which preset chain to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainKind {
+    Default,
+    Bass,
+    Practice,
+    Looper,
+}
+
+/// Build and initialise a chain. Allocates heavily, so call it **without**
+/// holding the engine lock, then install it with [`KicksEngine::swap_registry`].
+pub fn build_registry(kind: ChainKind, sample_rate: f64) -> anyhow::Result<PluginRegistry> {
+    let mut r = PluginRegistry::new();
+    match kind {
+        ChainKind::Default => r.build_default_chain(),
+        ChainKind::Bass => r.build_bass_chain(),
+        ChainKind::Practice => r.build_practice_chain(),
+        ChainKind::Looper => r.build_looper_chain(),
+    }
+    r.init_all(sample_rate)?;
+    Ok(r)
+}
+
 /// The default internal processing engine using kicks-dsp plugins.
 pub struct KicksEngine {
     plugin_registry: PluginRegistry,
@@ -41,6 +64,24 @@ impl KicksEngine {
             sample_rate: 48000.0,
             buffer_size: 256,
         }
+    }
+
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    /// Replace the whole chain in O(1). Returns the old chain so the caller
+    /// can drop it after releasing the engine lock (dropping frees memory).
+    pub fn swap_registry(&mut self, new: PluginRegistry) -> PluginRegistry {
+        std::mem::replace(&mut self.plugin_registry, new)
+    }
+
+    /// Install a convolver prepared with [`crate::Cab::prepare_ir`].
+    /// Returns the replaced convolver (drop it outside the lock).
+    pub fn install_cab_ir(
+        &mut self, path: String, conv: crate::Convolver,
+    ) -> Result<Option<crate::Convolver>, crate::Convolver> {
+        self.plugin_registry.install_cab_ir(path, conv)
     }
 
     /// Set a parameter on a specific plugin by name.
@@ -156,6 +197,24 @@ impl KicksEngine {
     }
 }
 
+impl KicksEngine {
+    /// Real-time entry point used by every audio backend: apply queued
+    /// parameter changes, then process one block.
+    ///
+    /// Allocation-free (see `tests/no_alloc.rs`). Errors from plugins are
+    /// turned into silence rather than propagated.
+    pub fn process_block(
+        &mut self, rx: &mut crate::param::ParamConsumer, input: &[f32], output: &mut [f32],
+    ) {
+        while let Some((key, value)) = crate::param::try_recv(rx) {
+            self.plugin_registry.set_parameter_rt(key.as_str(), value);
+        }
+        if self.plugin_registry.process_all(input, output).is_err() {
+            output.fill(0.0);
+        }
+    }
+}
+
 impl AudioEngine for KicksEngine {
     fn init(&mut self, sample_rate: f64, buffer_size: u32) -> anyhow::Result<()> {
         self.sample_rate = sample_rate;
@@ -184,5 +243,36 @@ impl AudioEngine for KicksEngine {
 
     fn set_parameter(&mut self, id: &str, value: f32) {
         self.plugin_registry.set_parameter(id, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swap_registry_installs_prebuilt_chain() {
+        let mut eng = KicksEngine::new();
+        eng.init(48_000.0, 256).unwrap();
+        let bass = build_registry(ChainKind::Bass, eng.sample_rate()).unwrap();
+        let old = eng.swap_registry(bass);
+        assert!(!old.is_empty());
+        let mut out = vec![0.0; 256];
+        eng.process(&[0.1; 256], &mut out).unwrap();
+        assert!(out.iter().all(|s| s.is_finite()));
+        assert_eq!(old.len(), 8);
+        assert_eq!(eng.audio_levels().len(), 5);
+    }
+
+    #[test]
+    fn install_cab_ir_returns_previous() {
+        let mut eng = KicksEngine::new();
+        eng.init(48_000.0, 256).unwrap();
+        let ir = vec![1.0, 0.5, 0.25];
+        let a = crate::Cab::prepare_ir(&ir, 48_000.0);
+        assert!(matches!(eng.install_cab_ir("a.wav".into(), a), Ok(None)));
+        let b = crate::Cab::prepare_ir(&ir, 48_000.0);
+        assert!(matches!(eng.install_cab_ir("b.wav".into(), b), Ok(Some(_))));
+        assert_eq!(eng.cab_ir_info().unwrap().path, "b.wav");
     }
 }

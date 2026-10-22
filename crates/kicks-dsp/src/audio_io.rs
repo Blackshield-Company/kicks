@@ -92,8 +92,7 @@ impl CpalAudioIO {
     /// When provided, the callback stores (percentage * 1000) on each cycle.
     pub fn start(
         &mut self, engine: Arc<Mutex<KicksEngine>>, config: AudioConfig,
-        #[cfg(feature = "cpal-backend")] param_rx: ringbuf::HeapCons<(String, f32)>,
-        cpu_load: Option<Arc<std::sync::atomic::AtomicU64>>,
+        param_rx: crate::param::ParamConsumer, cpu_load: Option<Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<()> {
         #[cfg(feature = "cpal-backend")]
         {
@@ -187,18 +186,18 @@ impl CpalAudioIO {
 
                         let start = std::time::Instant::now();
 
+                        // The main thread only holds the engine lock for O(1)
+                        // swaps (chains/IRs are built off-lock), so try_lock
+                        // almost always succeeds. If it fails, the previous
+                        // block is repeated at reduced level rather than a hard
+                        // dropout to silence.
                         if let Ok(mut eng) = eng.try_lock() {
-                            // Drain pending parameter changes (lock-free SPSC
-                            // queue) before processing audio.  The main thread
-                            // pushes to the producer side without holding the
-                            // engine mutex, so `try_lock` almost always succeeds.
-                            while let Some((id, value)) = param_rx.try_pop() {
-                                eng.set_parameter(&id, value);
+                            eng.process_block(&mut param_rx, &input_buf, &mut output_buf);
+                        } else {
+                            for s in output_buf.iter_mut() {
+                                *s *= 0.5;
                             }
-
-                            let _ = eng.process(&input_buf, &mut output_buf);
                         }
-                        // If try_lock fails, output_buf stays zero (silence)
 
                         let elapsed = start.elapsed().as_secs_f64();
                         let budget = bs as f64 / sr as f64;
@@ -237,7 +236,7 @@ impl CpalAudioIO {
 
         #[cfg(not(feature = "cpal-backend"))]
         {
-            let _ = (engine, config);
+            let _ = (engine, config, param_rx);
             tracing::warn!("CPAL backend not compiled in; audio I/O disabled");
         }
 
@@ -345,6 +344,9 @@ pub struct JackProcessHandler {
     in_r: jack::Port<jack::AudioIn>,
     out_l: jack::Port<jack::AudioOut>,
     out_r: jack::Port<jack::AudioOut>,
+    param_rx: Option<crate::param::ParamConsumer>,
+    mono_in: Vec<f32>,
+    mono_out: Vec<f32>,
 }
 
 #[cfg(feature = "jack-backend")]
@@ -359,21 +361,33 @@ impl jack::ProcessHandler for JackProcessHandler {
 
         let n = ps.n_frames() as usize;
 
+        // Buffers were sized at activation; if JACK grows the period past
+        // that, process what fits rather than allocate in the callback.
+        let n = n.min(self.mono_in.len());
+        let mono_in = &mut self.mono_in[..n];
+        let mono_out = &mut self.mono_out[..n];
+
         // Mix stereo input to mono for the engine (KicksEngine is mono)
-        let mut mono_in = vec![0.0f32; n];
         for i in 0..n {
             mono_in[i] = (in_l_buf[i] + in_r_buf[i]) * 0.5;
         }
 
-        let mut mono_out = vec![0.0f32; n];
-
         if let Ok(mut eng) = self.engine.try_lock() {
-            let _ = eng.process(&mono_in, &mut mono_out);
+            match self.param_rx.as_mut() {
+                Some(rx) => eng.process_block(rx, mono_in, mono_out),
+                None => {
+                    if eng.process(mono_in, mono_out).is_err() {
+                        mono_out.fill(0.0);
+                    }
+                }
+            }
+        } else {
+            mono_out.fill(0.0);
         }
 
         // Copy mono output to both stereo channels
-        out_l_buf[..n].copy_from_slice(&mono_out[..n]);
-        out_r_buf[..n].copy_from_slice(&mono_out[..n]);
+        out_l_buf[..n].copy_from_slice(mono_out);
+        out_r_buf[..n].copy_from_slice(mono_out);
 
         // CPU load tracking
         let elapsed = start.elapsed().as_secs_f64();
@@ -439,7 +453,7 @@ impl JackAudioIO {
     /// `engine` is the DSP engine shared with the process thread.
     /// `cpu_load` is an optional atomic for monitoring DSP load.
     pub fn start(
-        &mut self, engine: Arc<Mutex<KicksEngine>>,
+        &mut self, engine: Arc<Mutex<KicksEngine>>, param_rx: crate::param::ParamConsumer,
         cpu_load: Option<Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<()> {
         #[cfg(feature = "jack-backend")]
@@ -488,6 +502,10 @@ impl JackAudioIO {
                 in_r,
                 out_l,
                 out_r,
+                param_rx: Some(param_rx),
+                // Generous headroom: JACK periods rarely exceed 8192 frames.
+                mono_in: vec![0.0; (buffer_size as usize).max(8192)],
+                mono_out: vec![0.0; (buffer_size as usize).max(8192)],
             };
 
             let active_client = client
@@ -509,7 +527,7 @@ impl JackAudioIO {
 
         #[cfg(not(feature = "jack-backend"))]
         {
-            let _ = (engine, cpu_load);
+            let _ = (engine, param_rx, cpu_load);
             tracing::warn!("JACK backend not compiled in; audio I/O disabled");
         }
 

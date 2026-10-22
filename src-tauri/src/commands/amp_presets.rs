@@ -86,7 +86,7 @@ pub fn apply_amp_preset(state: State<'_, AppState>, preset_name: String) -> Resu
     // Push bass_mode through the lock-free parameter channel
     if let Ok(tx_guard) = state.param_tx.lock() {
         if let Some(ref tx) = *tx_guard {
-            let _ = tx.send("bass_mode".to_string(), preset.bass_mode);
+            let _ = tx.send("bass_mode", preset.bass_mode);
         }
     }
 

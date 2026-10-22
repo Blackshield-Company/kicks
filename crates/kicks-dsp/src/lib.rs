@@ -13,7 +13,6 @@ pub mod fft_convolution;
 pub mod looper;
 pub mod metronome;
 pub mod nam;
-#[cfg(feature = "cpal-backend")]
 pub mod param;
 pub mod plugins;
 pub mod tuner;
@@ -23,7 +22,7 @@ pub use audio_io::{
 };
 pub use bass_amp::BassAmp;
 pub use convolution::Convolver;
-pub use engine::{AudioEngine, KicksEngine};
+pub use engine::{build_registry, AudioEngine, ChainKind, KicksEngine};
 #[cfg(feature = "fft-convolution")]
 pub use fft_convolution::FftConvolver;
 pub use looper::Looper;
