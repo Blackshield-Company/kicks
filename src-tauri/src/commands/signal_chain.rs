@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use kicks_core::persistence;
 use kicks_core::signal_chain::SignalChain;
 use serde::Serialize;
@@ -32,21 +33,21 @@ fn persist_chain(chain: &SignalChain) {
 ///
 /// Call this **before** any mutation to enable undo for that operation.
 pub fn push_undo_state(state: &AppState) {
-    let current = state.signal_chain.lock().unwrap().clone();
-    let mut undo = state.undo_chain.lock().unwrap();
+    let current = state.signal_chain.lock_or_recover().clone();
+    let mut undo = state.undo_chain.lock_or_recover();
     undo.push(current);
     if undo.len() > UNDO_LIMIT {
         undo.remove(0);
     }
     // Any new mutation invalidates the redo stack
-    let mut redo = state.redo_chain.lock().unwrap();
+    let mut redo = state.redo_chain.lock_or_recover();
     redo.clear();
 }
 
 /// Get the current signal chain.
 #[tauri::command]
 pub fn get_signal_chain(state: State<'_, AppState>) -> ChainSnapshot {
-    let chain = state.signal_chain.lock().unwrap();
+    let chain = state.signal_chain.lock_or_recover();
     let slots = chain
         .slots
         .iter()

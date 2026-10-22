@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -23,7 +24,7 @@ pub struct NamModelLoadResult {
 /// List all .nam files in the configured NAM directories.
 #[tauri::command]
 pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
-    let config = state.config.lock().unwrap();
+    let config = state.config.lock_or_recover();
     let mut results = Vec::new();
 
     for dir in &config.nam_directories {

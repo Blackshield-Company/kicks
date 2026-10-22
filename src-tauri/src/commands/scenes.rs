@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use kicks_core::persistence;
 use kicks_core::scene::SceneCollection;
 use kicks_core::signal_chain::SignalChain;
@@ -34,7 +35,7 @@ fn persist_scenes(scenes: &SceneCollection) {
 /// List all scenes.
 #[tauri::command]
 pub fn list_scenes(state: State<'_, AppState>) -> Vec<SceneInfo> {
-    let scenes = state.scenes.lock().unwrap();
+    let scenes = state.scenes.lock_or_recover();
     let active = scenes.active_index();
     scenes
         .scenes

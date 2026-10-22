@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use kicks_core::preset::{Bank, Preset};
 use serde::Serialize;
 use tauri::State;
@@ -25,7 +26,7 @@ pub struct BankDescriptor {
 /// List all presets organized by bank.
 #[tauri::command]
 pub fn list_presets(state: State<'_, AppState>) -> Vec<BankDescriptor> {
-    let collection = state.presets.lock().unwrap();
+    let collection = state.presets.lock_or_recover();
     collection
         .banks
         .iter()

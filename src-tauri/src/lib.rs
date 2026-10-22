@@ -14,6 +14,7 @@ use tauri::Manager;
 mod ai;
 mod commands;
 mod midi;
+mod sync;
 
 /// Maximum number of undo/redo steps to keep.
 const UNDO_LIMIT: usize = 50;

@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use kicks_core::config::{AiProvider, AudioBackend, EngineMode, KicksConfig};
 use kicks_dsp::param::param_channel;
 use kicks_dsp::{AudioConfig, AudioEngine};
@@ -63,7 +64,7 @@ impl From<&KicksConfig> for SettingsPayload {
 /// Get the current application settings.
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> SettingsPayload {
-    let config = state.config.lock().unwrap();
+    let config = state.config.lock_or_recover();
     SettingsPayload::from(&*config)
 }
 
