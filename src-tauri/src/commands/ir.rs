@@ -83,7 +83,9 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
 
 /// Open a file dialog to pick an IR file, returning its metadata.
 #[tauri::command]
-pub async fn pick_ir_file(app: tauri::AppHandle<Wry>) -> Result<Option<IrFileInfo>, String> {
+pub async fn pick_ir_file(
+    app: tauri::AppHandle<Wry>, state: State<'_, AppState>,
+) -> Result<Option<IrFileInfo>, String> {
     let file = app
         .dialog()
         .file()
@@ -96,6 +98,7 @@ pub async fn pick_ir_file(app: tauri::AppHandle<Wry>) -> Result<Option<IrFileInf
         Some(path) => {
             let path_str = path.to_string();
             let path = std::path::PathBuf::from(&path_str);
+            state.path_grants.grant(&path);
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -154,11 +157,15 @@ fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
 /// Load an impulse response file into the Cab plugin.
 #[tauri::command]
 pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoadResult, String> {
-    // Validate file exists
-    let fpath = std::path::Path::new(&path);
-    if !fpath.exists() {
-        return Err(format!("File not found: {}", path));
-    }
+    let roots = state.config.lock_or_recover().ir_directories.clone();
+    let fpath = crate::path_guard::check_file(
+        &path,
+        &roots,
+        &state.path_grants,
+        &["wav"],
+        crate::path_guard::MAX_IR_BYTES,
+    )?;
+    let fpath = fpath.as_path();
 
     // Read WAV file and extract float samples
     let mut reader =
@@ -316,13 +323,9 @@ pub fn clear_cab_ir(state: State<'_, AppState>) -> Result<(), String> {
 pub fn scan_ir_directory(
     state: State<'_, AppState>, dir_path: String,
 ) -> Result<Vec<IrFileInfo>, String> {
-    let _config = state.config.lock().map_err(|e| e.to_string())?;
+    let roots = state.config.lock_or_recover().ir_directories.clone();
+    let path = crate::path_guard::check_dir(&dir_path, &roots, &state.path_grants)?;
     let mut results = Vec::new();
-    let path = PathBuf::from(&dir_path);
-
-    if !path.exists() {
-        return Err(format!("Directory '{}' does not exist", dir_path));
-    }
 
     let entries =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;

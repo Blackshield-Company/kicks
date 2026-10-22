@@ -51,6 +51,29 @@ pub fn ensure_config_dir() -> Result<()> {
 
 // ── Generic JSON helpers ─────────────────────────────────────────────────────
 
+/// Write `bytes` to `path`, readable only by the current user on Unix
+/// (mode 0600). Config files can hold the AI API key, so they must not be
+/// world-readable.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    // `mode` only applies on create; tighten a pre-existing file too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 /// Save `data` as pretty-printed JSON to `path`.
 pub fn save_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
     ensure_config_dir()?;
@@ -58,7 +81,7 @@ pub fn save_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
         .with_context(|| format!("Failed to serialize data to {}", path.display()))?;
     // Atomic write: write to temp file, then rename
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &bytes)
+    write_private(&tmp, &bytes)
         .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("Failed to rename {} to {}", tmp.display(), path.display()))?;
@@ -250,6 +273,21 @@ pub fn load_signal_chain() -> crate::signal_chain::SignalChain {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_is_owner_only_even_over_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("kicks-priv-{}.json", std::process::id()));
+        std::fs::write(&p, b"old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_private(&p, b"{\"ai_api_key\":\"k\"}").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&p).unwrap(), b"{\"ai_api_key\":\"k\"}");
+        let _ = std::fs::remove_file(&p);
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;

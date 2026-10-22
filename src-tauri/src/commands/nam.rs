@@ -68,13 +68,9 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
 pub fn scan_nam_directory(
     state: State<'_, AppState>, dir_path: String,
 ) -> Result<Vec<NamFileInfo>, String> {
-    let _config = state.config.lock().map_err(|e| e.to_string())?;
+    let roots = state.config.lock_or_recover().nam_directories.clone();
+    let path = crate::path_guard::check_dir(&dir_path, &roots, &state.path_grants)?;
     let mut results = Vec::new();
-    let path = std::path::PathBuf::from(&dir_path);
-
-    if !path.exists() {
-        return Err(format!("Directory '{}' does not exist", dir_path));
-    }
 
     let entries =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
@@ -110,10 +106,16 @@ pub fn scan_nam_directory(
 pub fn load_nam_model(
     state: State<'_, AppState>, path: String,
 ) -> Result<NamModelLoadResult, String> {
-    let fpath = std::path::Path::new(&path);
-    if !fpath.exists() {
-        return Err(format!("File not found: {}", path));
-    }
+    let roots = state.config.lock_or_recover().nam_directories.clone();
+    let resolved = crate::path_guard::check_file(
+        &path,
+        &roots,
+        &state.path_grants,
+        &["nam"],
+        crate::path_guard::MAX_NAM_BYTES,
+    )?;
+    let path = resolved.to_string_lossy().into_owned();
+    let fpath = resolved.as_path();
 
     let file_name = fpath
         .file_name()

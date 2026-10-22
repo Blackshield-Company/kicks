@@ -120,7 +120,11 @@ pub fn save_midi_config(
 #[tauri::command]
 pub fn connect_midi_device(state: State<'_, AppState>, device_name: String) -> Result<(), String> {
     let mut manager = state.midi_manager.lock().map_err(|e| e.to_string())?;
-    manager.connect(&device_name)?;
+    let route = crate::midi::MidiRoute {
+        config: state.midi_config.clone(),
+        param_tx: state.param_tx.clone(),
+    };
+    manager.connect(&device_name, route)?;
 
     // Update config with active device
     if let Ok(mut config) = state.midi_config.lock() {
@@ -144,73 +148,32 @@ pub fn disconnect_midi_device(state: State<'_, AppState>) -> Result<(), String> 
     Ok(())
 }
 
-/// Poll for pending MIDI CC events, route matched mappings to the engine,
-/// and return reports for the frontend (learn mode UI).
+/// Drain MIDI activity for the UI (learn mode and activity display).
+///
+/// Mapped CCs were already applied to the engine on the MIDI input thread
+/// when they arrived; this command no longer routes anything, so MIDI
+/// control keeps working when the UI is busy or the window is hidden.
 #[tauri::command]
 pub fn poll_midi_events(state: State<'_, AppState>) -> Result<Vec<MidiEventReport>, String> {
-    let manager = state.midi_manager.lock().map_err(|e| e.to_string())?;
-    let config = state.midi_config.lock().map_err(|e| e.to_string())?;
+    let events = state.midi_manager.lock_or_recover().drain_events();
+    Ok(events.into_iter().map(MidiEventReport::from).collect())
+}
 
-    let events = manager.drain_events();
-    let mut reports = Vec::new();
-
-    for (channel, cc, raw_value) in events {
-        let normalized = raw_value as f32 / 127.0;
-
-        // If learn mode is active, record the last CC
-        if config.learn_mode {
-            if let Ok(mut c) = state.midi_config.lock() {
-                c.last_cc = Some(cc);
-            }
-            reports.push(MidiEventReport {
-                cc,
-                channel,
-                raw_value,
-                normalized,
-                mapped_parameter: None,
-                mapped_value: None,
-            });
-            continue;
-        }
-
-        // Look for a matching mapping (channel match or global)
-        let matched = config
-            .mappings
-            .iter()
-            .find(|m| m.cc == cc && (m.channel == channel || config.channel == 0));
-
-        if let Some(mapping) = matched {
-            let param_value = mapping.min + normalized * (mapping.max - mapping.min);
-
-            // Push to lock-free parameter channel (no engine mutex needed)
-            if let Ok(ref tx_guard) = state.param_tx.lock() {
-                if let Some(ref tx) = **tx_guard {
-                    let _ = tx.send(mapping.parameter_id.clone(), param_value);
-                }
-            }
-
-            reports.push(MidiEventReport {
-                cc,
-                channel,
-                raw_value,
-                normalized,
-                mapped_parameter: Some(mapping.parameter_id.clone()),
-                mapped_value: Some(param_value),
-            });
-        } else {
-            // Unmapped CC — still report it for learn mode display
-            reports.push(MidiEventReport {
-                cc,
-                channel,
-                raw_value,
-                normalized,
-                mapped_parameter: None,
-                mapped_value: None,
-            });
+impl From<crate::midi::MidiEvent> for MidiEventReport {
+    fn from(e: crate::midi::MidiEvent) -> Self {
+        let (mapped_parameter, mapped_value) = match e.mapped {
+            Some((p, v)) => (Some(p), Some(v)),
+            None => (None, None),
+        };
+        Self {
+            cc: e.cc,
+            channel: e.channel,
+            raw_value: e.raw_value,
+            normalized: e.raw_value as f32 / 127.0,
+            mapped_parameter,
+            mapped_value,
         }
     }
-
-    Ok(reports)
 }
 
 /// Enable or disable MIDI learn mode.
