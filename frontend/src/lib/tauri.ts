@@ -17,6 +17,20 @@ function resolveInvoke(): ((cmd: string, args?: Record<string, unknown>) => Prom
 /**
  * Safely invoke a Tauri command, falling back gracefully when running in a browser.
  */
+/**
+ * Tauri 2 matches command arguments by their camelCase name (`slot_id` in
+ * Rust is `slotId` over IPC). This file writes snake_case keys, which the
+ * real backend rejected with "missing required key". Convert top-level keys
+ * only: nested values are serde structs that keep their own field names.
+ */
+export function toCommandArgs(args: Record<string, unknown> = {}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase())] = v;
+  }
+  return out;
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const tauriInvoke = resolveInvoke();
 
@@ -25,7 +39,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
     return simulate<T>(cmd, args);
   }
 
-  return tauriInvoke(cmd, args ?? {}) as Promise<T>;
+  return tauriInvoke(cmd, toCommandArgs(args)) as Promise<T>;
 }
 
 // ── Simulated responses for dev mode (outside Tauri) ──

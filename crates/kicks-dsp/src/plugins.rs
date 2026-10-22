@@ -1263,6 +1263,9 @@ impl Plugin for Reverb {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Registry for managing a chain of plugins.
+/// Per-slot pseudo-parameter controlling the wet/dry mix (`"plugin/wet_dry"`).
+pub const WET_DRY_PARAM: &str = "wet_dry";
+
 pub struct PluginRegistry {
     plugins: Vec<Box<dyn Plugin>>,
     parameters: HashMap<String, f32>,
@@ -1277,6 +1280,9 @@ pub struct PluginRegistry {
     /// Whether each plugin is enabled (true) or bypassed (false).
     /// Length matches the number of plugins.
     enabled: Vec<bool>,
+    /// Wet/dry mix per plugin (1.0 = fully processed, 0.0 = dry).
+    /// Length matches the number of plugins.
+    wet: Vec<f32>,
 }
 
 impl Default for PluginRegistry {
@@ -1294,6 +1300,7 @@ impl PluginRegistry {
             buf_a: Vec::new(),
             buf_b: Vec::new(),
             enabled: Vec::new(),
+            wet: Vec::new(),
         }
     }
 
@@ -1301,6 +1308,7 @@ impl PluginRegistry {
         self.plugins.push(plugin);
         self.levels.push(0.0);
         self.enabled.push(true);
+        self.wet.push(1.0);
     }
 
     /// Remove all plugins.
@@ -1309,6 +1317,7 @@ impl PluginRegistry {
         self.parameters.clear();
         self.levels.clear();
         self.enabled.clear();
+        self.wet.clear();
     }
 
     /// Number of plugins in the chain.
@@ -1378,6 +1387,13 @@ impl PluginRegistry {
             };
             let level = if self.enabled.get(i).copied().unwrap_or(true) {
                 plugin.process(src, dst)?;
+                let w = self.wet.get(i).copied().unwrap_or(1.0);
+                if w < 1.0 {
+                    let d = 1.0 - w;
+                    for (o, &x) in dst.iter_mut().zip(src.iter()) {
+                        *o = *o * w + x * d;
+                    }
+                }
                 compute_rms(dst)
             } else {
                 dst.copy_from_slice(src);
@@ -1413,6 +1429,10 @@ impl PluginRegistry {
                     if let Some(e) = self.enabled.get_mut(i) {
                         *e = value > 0.5;
                     }
+                } else if param_id == WET_DRY_PARAM {
+                    if let Some(w) = self.wet.get_mut(i) {
+                        *w = value.clamp(0.0, 1.0);
+                    }
                 } else if plugin.get_parameter(param_id).is_some() {
                     plugin.set_parameter(param_id, value);
                 }
@@ -1425,6 +1445,53 @@ impl PluginRegistry {
                 plugin.set_parameter(id, value);
             }
         }
+    }
+
+    /// Reorder plugins to follow `order` (plugin names). Plugins not named
+    /// keep their relative order and are appended after the named ones,
+    /// except that `input` stays first and `output` stays last.
+    ///
+    /// Enabled flags, wet/dry and levels move with their plugin. This is a
+    /// control-thread operation (it allocates small index vectors); it holds
+    /// no plugin state copies and runs in O(n log n) for n plugins.
+    /// Returns `true` if anything moved.
+    pub fn reorder<S: AsRef<str>>(&mut self, order: &[S]) -> bool {
+        let n = self.plugins.len();
+        let rank = |name: &str| -> usize {
+            if name == "input" {
+                return 0;
+            }
+            if name == "output" {
+                return usize::MAX;
+            }
+            order
+                .iter()
+                .position(|o| o.as_ref() == name)
+                .map(|p| p + 1)
+                .unwrap_or(usize::MAX - 1)
+        };
+        let mut idx: Vec<usize> = (0..n).collect();
+        // Stable sort keeps unnamed plugins in their current relative order.
+        idx.sort_by_key(|&i| rank(self.plugins[i].name()));
+        if idx.iter().enumerate().all(|(a, &b)| a == b) {
+            return false;
+        }
+        let mut plugins: Vec<Option<Box<dyn Plugin>>> = self.plugins.drain(..).map(Some).collect();
+        let (enabled, wet, levels) = (self.enabled.clone(), self.wet.clone(), self.levels.clone());
+        for (k, &i) in idx.iter().enumerate() {
+            if let Some(p) = plugins[i].take() {
+                self.plugins.push(p);
+            }
+            self.enabled[k] = enabled[i];
+            self.wet[k] = wet[i];
+            self.levels[k] = levels[i];
+        }
+        true
+    }
+
+    /// Plugin names in processing order.
+    pub fn plugin_names(&self) -> Vec<&str> {
+        self.plugins.iter().map(|p| p.name()).collect()
     }
 
     /// Return the current per-plugin RMS audio levels.
@@ -1478,6 +1545,9 @@ impl PluginRegistry {
             if param_id == "enabled" {
                 return self.enabled.get(i).map(|&e| if e { 1.0 } else { 0.0 });
             }
+            if param_id == WET_DRY_PARAM {
+                return self.wet.get(i).copied();
+            }
             return self.plugins[i].get_parameter(param_id);
         }
         // Fall through to plugins
@@ -1496,6 +1566,8 @@ impl PluginRegistry {
         if let Some((plugin_name, param_id)) = id.split_once('/') {
             if param_id == "enabled" {
                 self.set_plugin_enabled(plugin_name, value > 0.5);
+            } else if param_id == WET_DRY_PARAM {
+                self.set_parameter_rt(id, value);
             } else {
                 self.set_parameter_on_plugin(plugin_name, param_id, value);
             }
@@ -1789,6 +1861,79 @@ mod tests {
         r.process_all(&input, &mut output).unwrap();
         assert!(output.iter().all(|s| s.is_finite()));
         assert!(output[9_999] != 0.0 || output.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn reorder_moves_flags_with_plugins() {
+        let mut r = PluginRegistry::new();
+        r.build_default_chain();
+        r.init_all(48_000.0).unwrap();
+        r.set_parameter_rt("delay/enabled", 0.0);
+        r.set_parameter_rt("delay/wet_dry", 0.3);
+        assert!(r.reorder(&["tuner", "delay", "boost", "amp", "cab", "reverb"]));
+        assert_eq!(
+            r.plugin_names(),
+            ["input", "tuner", "delay", "boost", "amp", "cab", "reverb", "output"]
+        );
+        assert_eq!(r.get_parameter("delay/enabled"), Some(0.0));
+        assert_eq!(r.get_parameter("delay/wet_dry"), Some(0.3));
+        assert_eq!(r.get_parameter("boost/enabled"), Some(1.0));
+        // Same order again: nothing moves.
+        assert!(!r.reorder(&["tuner", "delay", "boost", "amp", "cab", "reverb"]));
+        // input/output are pinned even if named elsewhere.
+        r.reorder(&["output", "reverb", "input"]);
+        let names = r.plugin_names();
+        assert_eq!(names.first(), Some(&"input"));
+        assert_eq!(names.last(), Some(&"output"));
+        assert_eq!(names[1], "reverb");
+    }
+
+    #[test]
+    fn reorder_changes_the_sound() {
+        // Boost before vs after amp must differ (non-linear amp).
+        let render = |order: &[&str]| {
+            let mut r = PluginRegistry::new();
+            r.build_default_chain();
+            r.init_all(48_000.0).unwrap();
+            r.set_parameter_rt("delay/enabled", 0.0);
+            r.set_parameter_rt("reverb/enabled", 0.0);
+            r.reorder(order);
+            let input: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+            let mut out = vec![0.0; 1024];
+            r.process_all(&input, &mut out).unwrap();
+            out
+        };
+        let a = render(&["tuner", "boost", "amp", "cab"]);
+        let b = render(&["tuner", "amp", "boost", "cab"]);
+        let diff: f32 = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum();
+        assert!(diff > 1e-3, "reordering had no audible effect ({diff})");
+    }
+
+    #[test]
+    fn wet_dry_mixes_processed_and_dry() {
+        let mut r = PluginRegistry::new();
+        r.add_plugin(Box::new(Boost::new()));
+        r.init_all(48_000.0).unwrap();
+        let input = vec![0.1f32; 256];
+        let mut wet = vec![0.0; 256];
+        r.process_all(&input, &mut wet).unwrap();
+        assert!((wet[100] - 0.1).abs() > 1e-4, "boost should change level");
+
+        r.set_parameter_rt("boost/wet_dry", 0.0);
+        let mut dry = vec![0.0; 256];
+        r.process_all(&input, &mut dry).unwrap();
+        assert!(dry.iter().all(|&x| (x - 0.1).abs() < 1e-6));
+
+        r.set_parameter_rt("boost/wet_dry", 0.5);
+        let mut half = vec![0.0; 256];
+        r.process_all(&input, &mut half).unwrap();
+        let expect = 0.5 * wet[100] + 0.5 * 0.1;
+        assert!(
+            (half[100] - expect).abs() < 1e-4,
+            "{} vs {}",
+            half[100],
+            expect
+        );
     }
 
     #[test]

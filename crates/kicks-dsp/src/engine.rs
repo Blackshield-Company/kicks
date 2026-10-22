@@ -84,6 +84,28 @@ impl KicksEngine {
         self.plugin_registry.install_cab_ir(path, conv)
     }
 
+    /// Reorder the running chain to follow `order` (plugin names).
+    /// See [`PluginRegistry::reorder`].
+    pub fn reorder_plugins<S: AsRef<str>>(&mut self, order: &[S]) -> bool {
+        self.plugin_registry.reorder(order)
+    }
+
+    /// Plugin names in processing order.
+    pub fn plugin_names(&self) -> Vec<String> {
+        self.plugin_registry
+            .plugin_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Apply a parameter directly (control thread, engine lock held).
+    /// Accepts the same ids as the param queue, including `"plugin/param"`,
+    /// `"plugin/enabled"` and `"plugin/wet_dry"`.
+    pub fn apply_param(&mut self, id: &str, value: f32) {
+        self.plugin_registry.set_parameter(id, value);
+    }
+
     /// Set a parameter on a specific plugin by name.
     pub fn set_parameter_on_plugin(&mut self, plugin_name: &str, id: &str, value: f32) -> bool {
         self.plugin_registry

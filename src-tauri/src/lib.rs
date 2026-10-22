@@ -44,6 +44,28 @@ pub struct AppState {
     pub cpu_load: Arc<AtomicU64>,
 }
 
+#[cfg(test)]
+impl AppState {
+    /// In-memory state for command tests (no disk, no audio device).
+    pub(crate) fn for_test() -> Self {
+        Self {
+            engine: Mutex::new(None),
+            audio_io: Mutex::new(None),
+            jack_audio_io: Mutex::new(None),
+            param_tx: Mutex::new(None),
+            signal_chain: Mutex::new(SignalChain::default()),
+            presets: Mutex::new(PresetCollection::default()),
+            scenes: Mutex::new(SceneCollection::default()),
+            config: Mutex::new(KicksConfig::default()),
+            midi_config: Mutex::new(MidiConfig::default()),
+            midi_manager: Mutex::new(midi::MidiManager::new()),
+            undo_chain: Mutex::new(Vec::new()),
+            redo_chain: Mutex::new(Vec::new()),
+            cpu_load: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
 /// Configure tracing/logging for the application.
 fn setup_logging() {
     tracing_subscriber::fmt()

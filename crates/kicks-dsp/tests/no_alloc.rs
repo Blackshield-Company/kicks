@@ -85,6 +85,7 @@ fn assert_chain_rt_safe(name: &str, build: impl FnOnce(&mut KicksEngine)) {
         ("master", 0.5),
         ("bpm", 0.6),
         ("running", 1.0),
+        ("amp/wet_dry", 0.5),
     ] {
         tx.send(id, v).unwrap();
     }
