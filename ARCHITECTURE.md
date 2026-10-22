@@ -73,6 +73,6 @@ frontend/src/
 
 - **Rust + Tauri** over Electron for memory efficiency and audio performance
 - **Workspace crates** for clear separation between concerns
-- **GPLv3** to align with Guitarix and the audio FOSS ecosystem
+- **Apache-2.0** (see LICENSE)
 - **CPAL** as primary audio backend (ALSA/PipeWire on Linux, CoreAudio on macOS, WASAPI on Windows); JACK still available as feature-gated alternative
 - **Demo-depth MVP** — prove all features work, deepen incrementally
