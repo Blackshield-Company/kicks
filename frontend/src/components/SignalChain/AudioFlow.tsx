@@ -16,6 +16,14 @@ function pluginMeta(pluginType: string) {
     Tuner: { label: 'TUN', color: 'bg-emerald-700', border: 'border-emerald-500' },
     Metronome: { label: 'MET', color: 'bg-orange-700', border: 'border-orange-500' },
     Looper: { label: 'LOP', color: 'bg-pink-700', border: 'border-pink-500' },
+    NoiseGate: { label: 'GATE', color: 'bg-slate-700', border: 'border-slate-500' },
+    Compressor: { label: 'CMP', color: 'bg-teal-700', border: 'border-teal-500' },
+    Overdrive: { label: 'OD', color: 'bg-lime-700', border: 'border-lime-500' },
+    Eq: { label: 'EQ', color: 'bg-yellow-700', border: 'border-yellow-500' },
+    Chorus: { label: 'CHO', color: 'bg-blue-700', border: 'border-blue-500' },
+    Phaser: { label: 'PHS', color: 'bg-purple-700', border: 'border-purple-500' },
+    Flanger: { label: 'FLG', color: 'bg-fuchsia-700', border: 'border-fuchsia-500' },
+    Tremolo: { label: 'TRM', color: 'bg-rose-700', border: 'border-rose-500' },
   };
   return map[pluginType] ?? {
     label: pluginType.slice(0, 3).toUpperCase(),
@@ -38,6 +46,15 @@ function keyParams(pluginType: string): string[] {
     case 'Tuner': return ['mute'];
     case 'Metronome': return ['bpm'];
     case 'Looper': return ['mix'];
+    case 'NoiseGate': return ['threshold'];
+    case 'Compressor': return ['threshold', 'ratio'];
+    case 'Overdrive': return ['drive', 'level'];
+    case 'Eq': return ['low', 'mid', 'high'];
+    case 'Chorus':
+    case 'Phaser':
+    case 'Flanger':
+      return ['rate', 'mix'];
+    case 'Tremolo': return ['rate', 'depth'];
     default: return [];
   }
 }

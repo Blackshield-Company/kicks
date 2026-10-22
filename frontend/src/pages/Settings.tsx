@@ -2,6 +2,7 @@ import { useEffect, useCallback, useState } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useHotkeys } from '../hooks/useHotkeys';
 import * as api from '../lib/tauri';
+import { RecordControl } from '../components/Recording/RecordControl';
 import type { AudioDeviceInfo, AudioStatus } from '../types/tauri';
 import { THEMES, applyTheme, getSavedThemeId, saveThemeId, getThemeById } from '../theme/theme';
 
@@ -232,6 +233,7 @@ export function Settings() {
               <span>Audio stopped</span>
             )}
           </div>
+          <RecordControl />
         </div>
       </section>
 

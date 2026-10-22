@@ -35,8 +35,58 @@ pub enum PluginType {
     Metronome,
     /// Audio looper with record, overdub, playback, and reverse.
     Looper,
+    /// Noise gate with hysteresis.
+    NoiseGate,
+    /// Feed-forward compressor.
+    Compressor,
+    /// Overdrive pedal.
+    Overdrive,
+    /// 3-band parametric EQ (low shelf, sweepable mid, high shelf).
+    Eq,
+    Chorus,
+    Phaser,
+    Flanger,
+    Tremolo,
     Output,
     Custom(String),
+}
+
+impl SignalChain {
+    /// Add any default slots missing from a chain saved by an older version
+    /// (e.g. pedals added later). Missing slots are inserted bypassed, just
+    /// before the Output slot, so the saved sound is unchanged. Returns the
+    /// ids that were added.
+    pub fn add_missing_default_slots(&mut self) -> Vec<String> {
+        let mut added = Vec::new();
+        for slot in SignalChain::default().slots {
+            if self.slots.iter().any(|s| s.id == slot.id) {
+                continue;
+            }
+            let mut slot = slot;
+            if !matches!(slot.plugin_type, PluginType::Input | PluginType::Output) {
+                slot.enabled = false;
+            }
+            let at = self
+                .slots
+                .iter()
+                .position(|s| s.plugin_type == PluginType::Output)
+                .unwrap_or(self.slots.len());
+            added.push(slot.id.clone());
+            self.slots.insert(at, slot);
+        }
+        added
+    }
+}
+
+/// An optional pedal slot that starts bypassed.
+fn pedal(id: &str, plugin_type: PluginType, params: &[(&str, f32)]) -> ChainSlot {
+    ChainSlot {
+        id: id.to_string(),
+        plugin_type,
+        enabled: false,
+        wet_dry: 1.0,
+        parameters: params.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+    }
 }
 
 impl Default for SignalChain {
@@ -57,6 +107,27 @@ impl Default for SignalChain {
                     wet_dry: 1.0,
                     parameters: [("mute".into(), 0.0)].into_iter().collect(),
                 },
+                pedal(
+                    "gate",
+                    PluginType::NoiseGate,
+                    &[("threshold", 0.3), ("release", 0.3)],
+                ),
+                pedal(
+                    "comp",
+                    PluginType::Compressor,
+                    &[
+                        ("threshold", 0.6),
+                        ("ratio", 0.3),
+                        ("attack", 0.3),
+                        ("release", 0.4),
+                        ("makeup", 0.2),
+                    ],
+                ),
+                pedal(
+                    "drive",
+                    PluginType::Overdrive,
+                    &[("drive", 0.4), ("tone", 0.5), ("level", 0.5)],
+                ),
                 ChainSlot {
                     id: "boost".to_string(),
                     plugin_type: PluginType::Boost,
@@ -93,6 +164,47 @@ impl Default for SignalChain {
                     .into_iter()
                     .collect(),
                 },
+                pedal(
+                    "eq",
+                    PluginType::Eq,
+                    &[
+                        ("low", 0.5),
+                        ("mid", 0.5),
+                        ("mid_freq", 0.5),
+                        ("q", 0.3),
+                        ("high", 0.5),
+                    ],
+                ),
+                pedal(
+                    "chorus",
+                    PluginType::Chorus,
+                    &[("rate", 0.3), ("depth", 0.5), ("mix", 0.5)],
+                ),
+                pedal(
+                    "phaser",
+                    PluginType::Phaser,
+                    &[
+                        ("rate", 0.3),
+                        ("depth", 0.7),
+                        ("feedback", 0.4),
+                        ("mix", 0.5),
+                    ],
+                ),
+                pedal(
+                    "flanger",
+                    PluginType::Flanger,
+                    &[
+                        ("rate", 0.3),
+                        ("depth", 0.5),
+                        ("feedback", 0.5),
+                        ("mix", 0.5),
+                    ],
+                ),
+                pedal(
+                    "tremolo",
+                    PluginType::Tremolo,
+                    &[("rate", 0.4), ("depth", 0.5)],
+                ),
                 ChainSlot {
                     id: "delay".to_string(),
                     plugin_type: PluginType::Delay,
@@ -127,6 +239,52 @@ impl Default for SignalChain {
                     parameters: [("volume".into(), 0.8)].into_iter().collect(),
                 },
             ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn old_chain_gains_new_pedals_bypassed_before_output() {
+        let mut chain = SignalChain::default();
+        chain
+            .slots
+            .retain(|s| !["gate", "eq", "tremolo"].contains(&s.id.as_str()));
+        let before: Vec<String> = chain.slots.iter().map(|s| s.id.clone()).collect();
+        let added = chain.add_missing_default_slots();
+        assert_eq!(added, ["gate", "eq", "tremolo"]);
+        let ids: Vec<&str> = chain.slots.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids.last(), Some(&"output"));
+        assert_eq!(
+            &ids[ids.len() - 4..ids.len() - 1],
+            ["gate", "eq", "tremolo"]
+        );
+        for id in ["gate", "eq", "tremolo"] {
+            assert!(!chain.slots.iter().find(|s| s.id == id).unwrap().enabled);
+        }
+        // Existing order untouched.
+        let kept: Vec<String> = chain
+            .slots
+            .iter()
+            .map(|s| s.id.clone())
+            .filter(|id| before.contains(id))
+            .collect();
+        assert_eq!(kept, before);
+        assert!(chain.add_missing_default_slots().is_empty());
+    }
+
+    #[test]
+    fn new_pedals_default_bypassed() {
+        let chain = SignalChain::default();
+        for id in [
+            "gate", "comp", "drive", "eq", "chorus", "phaser", "flanger", "tremolo",
+        ] {
+            let s = chain.slots.iter().find(|s| s.id == id).expect(id);
+            assert!(!s.enabled, "{id}");
+            assert_eq!(s.wet_dry, 1.0);
         }
     }
 }

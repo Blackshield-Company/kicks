@@ -2051,6 +2051,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "fundsp",
+ "hound",
  "jack",
  "realfft",
  "ringbuf",

@@ -42,6 +42,8 @@ pub struct AppState {
     pub redo_chain: Mutex<Vec<SignalChain>>,
     /// CPU load from audio callback: value is (percentage * 1000) as u64.
     pub cpu_load: Arc<AtomicU64>,
+    /// Active WAV recording (DI + processed), if any.
+    pub recording: Mutex<Option<kicks_dsp::recorder::Recording>>,
 }
 
 #[cfg(test)]
@@ -62,6 +64,7 @@ impl AppState {
             undo_chain: Mutex::new(Vec::new()),
             redo_chain: Mutex::new(Vec::new()),
             cpu_load: Arc::new(AtomicU64::new(0)),
+            recording: Mutex::new(None),
         }
     }
 }
@@ -86,7 +89,11 @@ fn load_state() -> (PresetCollection, KicksConfig, SignalChain) {
 
     let presets = persistence::load_presets();
     let config = persistence::load_config();
-    let signal_chain = persistence::load_signal_chain();
+    let mut signal_chain = persistence::load_signal_chain();
+    let added = signal_chain.add_missing_default_slots();
+    if !added.is_empty() {
+        tracing::info!("Added new pedals to saved chain (bypassed): {:?}", added);
+    }
 
     (presets, config, signal_chain)
 }
@@ -114,6 +121,7 @@ pub fn run() {
             undo_chain: Mutex::new(Vec::new()),
             redo_chain: Mutex::new(Vec::new()),
             cpu_load: Arc::new(AtomicU64::new(0)),
+            recording: Mutex::new(None),
         })
         .setup(|app| {
             // NOTE: tauri_plugin_log is intentionally NOT registered here —
@@ -136,6 +144,10 @@ pub fn run() {
             commands::engine::get_audio_levels,
             commands::engine::get_cpu_load,
             commands::engine::get_audio_status,
+            // Recording
+            commands::recording::start_recording,
+            commands::recording::stop_recording,
+            commands::recording::recording_status,
             // Signal Chain
             commands::signal_chain::get_signal_chain,
             commands::signal_chain::build_default_chain,

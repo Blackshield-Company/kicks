@@ -29,6 +29,14 @@ function pluginMeta(pluginType: string) {
     Tuner: { label: 'TUN', color: 'bg-emerald-700' },
     Metronome: { label: 'MET', color: 'bg-orange-700' },
     Looper: { label: 'LOP', color: 'bg-pink-700' },
+    NoiseGate: { label: 'GATE', color: 'bg-slate-700' },
+    Compressor: { label: 'CMP', color: 'bg-teal-700' },
+    Overdrive: { label: 'OD', color: 'bg-lime-700' },
+    Eq: { label: 'EQ', color: 'bg-yellow-700' },
+    Chorus: { label: 'CHO', color: 'bg-blue-700' },
+    Phaser: { label: 'PHS', color: 'bg-purple-700' },
+    Flanger: { label: 'FLG', color: 'bg-fuchsia-700' },
+    Tremolo: { label: 'TRM', color: 'bg-rose-700' },
   };
   return map[pluginType] ?? { label: pluginType.slice(0, 3).toUpperCase(), color: 'bg-zinc-500' };
 }
@@ -82,6 +90,52 @@ function pluginParams(pluginType: string): { id: string; label: string }[] {
         { id: 'feedback', label: 'Feedback' },
         { id: 'mix', label: 'Mix' },
         { id: 'speed', label: 'Speed' },
+      ];
+    case 'NoiseGate':
+      return [
+        { id: 'threshold', label: 'Threshold' },
+        { id: 'release', label: 'Release' },
+      ];
+    case 'Compressor':
+      return [
+        { id: 'threshold', label: 'Threshold' },
+        { id: 'ratio', label: 'Ratio' },
+        { id: 'attack', label: 'Attack' },
+        { id: 'release', label: 'Release' },
+        { id: 'makeup', label: 'Makeup' },
+      ];
+    case 'Overdrive':
+      return [
+        { id: 'drive', label: 'Drive' },
+        { id: 'tone', label: 'Tone' },
+        { id: 'level', label: 'Level' },
+      ];
+    case 'Eq':
+      return [
+        { id: 'low', label: 'Low' },
+        { id: 'mid', label: 'Mid' },
+        { id: 'mid_freq', label: 'Mid Freq' },
+        { id: 'q', label: 'Q' },
+        { id: 'high', label: 'High' },
+      ];
+    case 'Chorus':
+      return [
+        { id: 'rate', label: 'Rate' },
+        { id: 'depth', label: 'Depth' },
+        { id: 'mix', label: 'Mix' },
+      ];
+    case 'Phaser':
+    case 'Flanger':
+      return [
+        { id: 'rate', label: 'Rate' },
+        { id: 'depth', label: 'Depth' },
+        { id: 'feedback', label: 'Feedback' },
+        { id: 'mix', label: 'Mix' },
+      ];
+    case 'Tremolo':
+      return [
+        { id: 'rate', label: 'Rate' },
+        { id: 'depth', label: 'Depth' },
       ];
     case 'Output':
       return [

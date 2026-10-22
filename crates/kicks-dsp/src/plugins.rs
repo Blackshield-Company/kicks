@@ -1536,6 +1536,22 @@ impl PluginRegistry {
     }
 
     pub fn get_parameter(&self, id: &str) -> Option<f32> {
+        // Composite "plugin/param" ids read the live plugin state first: the
+        // audio thread updates plugins via `set_parameter_rt`, which does not
+        // touch the `parameters` cache, so the cache can be stale for them.
+        if let Some((plugin_name, param_id)) = id.split_once('/') {
+            if let Some(i) = self.plugins.iter().position(|p| p.name() == plugin_name) {
+                if param_id == "enabled" {
+                    return self.enabled.get(i).map(|&e| if e { 1.0 } else { 0.0 });
+                }
+                if param_id == WET_DRY_PARAM {
+                    return self.wet.get(i).copied();
+                }
+                if let Some(v) = self.plugins[i].get_parameter(param_id) {
+                    return Some(v);
+                }
+            }
+        }
         // Check local override first
         if let Some(&val) = self.parameters.get(id) {
             return Some(val);
@@ -1597,15 +1613,34 @@ impl PluginRegistry {
     /// The Tuner sits right after Input so it always analyzes the raw guitar
     /// signal (it passes audio through transparently unless muted).
     pub fn build_default_chain(&mut self) {
+        use crate::effects::{
+            chorus, flanger, Compressor, NoiseGate, Overdrive, ParametricEq, Phaser, Tremolo,
+        };
         self.clear();
         self.add_plugin(Box::new(Input));
         self.add_plugin(Box::new(Tuner::new()));
+        self.add_plugin_bypassed(Box::new(NoiseGate::new()));
+        self.add_plugin_bypassed(Box::new(Compressor::new()));
+        self.add_plugin_bypassed(Box::new(Overdrive::new()));
         self.add_plugin(Box::new(Boost::new()));
         self.add_plugin(Box::new(Amp::new()));
         self.add_plugin(Box::new(Cab::new()));
+        self.add_plugin_bypassed(Box::new(ParametricEq::new()));
+        self.add_plugin_bypassed(Box::new(chorus()));
+        self.add_plugin_bypassed(Box::new(Phaser::new()));
+        self.add_plugin_bypassed(Box::new(flanger()));
+        self.add_plugin_bypassed(Box::new(Tremolo::new()));
         self.add_plugin(Box::new(Delay::new()));
         self.add_plugin(Box::new(Reverb::new()));
         self.add_plugin(Box::new(Output::new()));
+    }
+
+    /// Add a plugin that starts bypassed (e.g. optional pedals).
+    pub fn add_plugin_bypassed(&mut self, plugin: Box<dyn Plugin>) {
+        self.add_plugin(plugin);
+        if let Some(e) = self.enabled.last_mut() {
+            *e = false;
+        }
     }
 
     /// Build a bass signal chain: Boost → BassAmp → Cab → Delay → Reverb.
@@ -1864,6 +1899,19 @@ mod tests {
     }
 
     #[test]
+    fn composite_get_reflects_rt_updates_after_cached_set() {
+        let mut r = PluginRegistry::new();
+        r.build_default_chain();
+        r.init_all(48_000.0).unwrap();
+        r.set_parameter("amp/drive", 0.1); // control thread, fills the cache
+        r.set_parameter_rt("amp/drive", 0.9); // audio thread, no cache
+        assert_eq!(r.get_parameter("amp/drive"), Some(0.9));
+        r.set_parameter("delay/enabled", 1.0);
+        r.set_parameter_rt("delay/enabled", 0.0);
+        assert_eq!(r.get_parameter("delay/enabled"), Some(0.0));
+    }
+
+    #[test]
     fn reorder_moves_flags_with_plugins() {
         let mut r = PluginRegistry::new();
         r.build_default_chain();
@@ -1873,7 +1921,10 @@ mod tests {
         assert!(r.reorder(&["tuner", "delay", "boost", "amp", "cab", "reverb"]));
         assert_eq!(
             r.plugin_names(),
-            ["input", "tuner", "delay", "boost", "amp", "cab", "reverb", "output"]
+            [
+                "input", "tuner", "delay", "boost", "amp", "cab", "reverb", "gate", "comp",
+                "drive", "eq", "chorus", "phaser", "flanger", "tremolo", "output"
+            ]
         );
         assert_eq!(r.get_parameter("delay/enabled"), Some(0.0));
         assert_eq!(r.get_parameter("delay/wet_dry"), Some(0.3));
@@ -2065,7 +2116,24 @@ mod tests {
     fn test_registry_default_chain() {
         let mut registry = PluginRegistry::new();
         registry.build_default_chain();
-        assert_eq!(registry.len(), 8);
+        assert_eq!(registry.len(), 16);
+        // Optional pedals start bypassed so the default sound is unchanged.
+        for id in [
+            "gate", "comp", "drive", "eq", "chorus", "phaser", "flanger", "tremolo",
+        ] {
+            assert_eq!(
+                registry.get_parameter(&format!("{id}/enabled")),
+                Some(0.0),
+                "{id}"
+            );
+        }
+        for id in ["tuner", "boost", "amp", "cab", "delay", "reverb"] {
+            assert_eq!(
+                registry.get_parameter(&format!("{id}/enabled")),
+                Some(1.0),
+                "{id}"
+            );
+        }
     }
 
     #[test]

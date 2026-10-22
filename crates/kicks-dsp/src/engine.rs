@@ -47,6 +47,8 @@ pub struct KicksEngine {
     plugin_registry: PluginRegistry,
     sample_rate: f64,
     buffer_size: u32,
+    /// Active WAV capture, if recording (see [`crate::recorder`]).
+    record_tap: Option<crate::recorder::RecordTap>,
 }
 
 impl Default for KicksEngine {
@@ -63,6 +65,7 @@ impl KicksEngine {
             plugin_registry: registry,
             sample_rate: 48000.0,
             buffer_size: 256,
+            record_tap: None,
         }
     }
 
@@ -82,6 +85,18 @@ impl KicksEngine {
         &mut self, path: String, conv: crate::Convolver,
     ) -> Result<Option<crate::Convolver>, crate::Convolver> {
         self.plugin_registry.install_cab_ir(path, conv)
+    }
+
+    /// Install (or remove, with `None`) the recording tap. Returns the
+    /// previous tap; drop it after releasing the engine lock.
+    pub fn set_record_tap(
+        &mut self, tap: Option<crate::recorder::RecordTap>,
+    ) -> Option<crate::recorder::RecordTap> {
+        std::mem::replace(&mut self.record_tap, tap)
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.record_tap.is_some()
     }
 
     /// Reorder the running chain to follow `order` (plugin names).
@@ -234,6 +249,9 @@ impl KicksEngine {
         if self.plugin_registry.process_all(input, output).is_err() {
             output.fill(0.0);
         }
+        if let Some(tap) = self.record_tap.as_mut() {
+            tap.push(input, output);
+        }
     }
 }
 
@@ -282,8 +300,37 @@ mod tests {
         let mut out = vec![0.0; 256];
         eng.process(&[0.1; 256], &mut out).unwrap();
         assert!(out.iter().all(|s| s.is_finite()));
-        assert_eq!(old.len(), 8);
+        assert_eq!(old.len(), 16);
         assert_eq!(eng.audio_levels().len(), 5);
+    }
+
+    #[test]
+    fn process_block_feeds_record_tap_with_dry_and_wet() {
+        let path =
+            std::env::temp_dir().join(format!("kicks-engine-rec-{}.wav", std::process::id()));
+        let mut eng = KicksEngine::new();
+        eng.init(48_000.0, 256).unwrap();
+        let (_tx, mut rx) = crate::param::param_channel();
+        let (tap, rec) = crate::recorder::Recording::start(&path, 48_000).unwrap();
+        assert!(eng.set_record_tap(Some(tap)).is_none());
+        assert!(eng.is_recording());
+        let input = [0.25f32; 256];
+        let mut out = [0.0f32; 256];
+        for _ in 0..4 {
+            eng.process_block(&mut rx, &input, &mut out);
+        }
+        drop(eng.set_record_tap(None));
+        let sum = rec.stop().unwrap();
+        assert_eq!(sum.frames, 1024);
+        let mut r = hound::WavReader::open(&path).unwrap();
+        let s: Vec<f32> = r.samples::<f32>().map(Result::unwrap).collect();
+        assert_eq!(s[s.len() - 2], 0.25, "channel 1 is the dry DI");
+        assert_eq!(
+            s[s.len() - 1],
+            out[255],
+            "channel 2 is the processed output"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

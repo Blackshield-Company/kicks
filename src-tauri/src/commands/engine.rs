@@ -156,12 +156,12 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
             let bass_val = slot.parameters.get("bass_mode").copied().unwrap_or(1.0);
             eng_inner.set_parameter("bass_mode", bass_val);
         }
-        // Apply all saved signal chain parameters to the engine
+        // Apply the saved chain: order, bypass, wet/dry and every parameter.
+        let order: Vec<&str> = chain.slots.iter().map(|s| s.id.as_str()).collect();
+        eng_inner.reorder_plugins(&order);
         for slot in &chain.slots {
-            let plugin_name = slot.id.clone();
-            eng_inner.set_plugin_enabled(&plugin_name, slot.enabled);
-            for (param_id, value) in &slot.parameters {
-                eng_inner.set_parameter_on_plugin(&plugin_name, param_id, *value);
+            for (key, value) in crate::commands::signal_chain::slot_messages(slot) {
+                eng_inner.apply_param(&key, value);
             }
         }
     }

@@ -7,6 +7,7 @@
 pub mod audio_io;
 pub mod bass_amp;
 pub mod convolution;
+pub mod effects;
 pub mod engine;
 #[cfg(feature = "fft-convolution")]
 pub mod fft_convolution;
@@ -16,6 +17,7 @@ pub mod metronome;
 pub mod nam;
 pub mod param;
 pub mod plugins;
+pub mod recorder;
 pub mod tuner;
 
 pub use audio_io::{
@@ -23,6 +25,9 @@ pub use audio_io::{
 };
 pub use bass_amp::BassAmp;
 pub use convolution::Convolver;
+pub use effects::{
+    Compressor, ModulatedDelay, NoiseGate, Overdrive, ParametricEq, Phaser, Tremolo,
+};
 pub use engine::{build_registry, AudioEngine, ChainKind, KicksEngine};
 #[cfg(feature = "fft-convolution")]
 pub use fft_convolution::FftConvolver;
