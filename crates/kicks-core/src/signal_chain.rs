@@ -209,7 +209,9 @@ impl Default for SignalChain {
                     id: "delay".to_string(),
                     plugin_type: PluginType::Delay,
                     enabled: false,
-                    wet_dry: 0.3,
+                    // Level comes from the plugin's own `mix`; the slot
+                    // wet/dry blend is fully wet so the two don't stack.
+                    wet_dry: 1.0,
                     parameters: [
                         ("time".into(), 0.3),
                         ("feedback".into(), 0.4),
@@ -222,7 +224,9 @@ impl Default for SignalChain {
                     id: "reverb".to_string(),
                     plugin_type: PluginType::Reverb,
                     enabled: true,
-                    wet_dry: 0.3,
+                    // Level comes from the plugin's own `mix`; the slot
+                    // wet/dry blend is fully wet so the two don't stack.
+                    wet_dry: 1.0,
                     parameters: [
                         ("size".into(), 0.5),
                         ("damping".into(), 0.5),
@@ -285,6 +289,26 @@ mod migration_tests {
             let s = chain.slots.iter().find(|s| s.id == id).expect(id);
             assert!(!s.enabled, "{id}");
             assert_eq!(s.wet_dry, 1.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_delay_and_reverb_are_not_double_diluted() {
+        let chain = SignalChain::default();
+        for id in ["delay", "reverb"] {
+            let slot = chain.slots.iter().find(|s| s.id == id).unwrap();
+            let mix = slot.parameters["mix"];
+            // Effective wet level = slot wet/dry * plugin mix.
+            assert!(
+                (slot.wet_dry * mix - 0.3).abs() < 1e-6,
+                "{id}: {} * {mix}",
+                slot.wet_dry
+            );
         }
     }
 }
