@@ -108,6 +108,7 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
     let output_device = config.output_device.clone();
     let audio_backend = config.audio_backend.clone();
     let jack_client_name = config.jack_client_name.clone();
+    let input_channel = config.input_channel;
     drop(config);
 
     let eng = Arc::new(Mutex::new(KicksEngine::new()));
@@ -203,6 +204,7 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
             let audio_config = AudioConfig {
                 sample_rate,
                 buffer_size,
+                input_channel,
                 output_device: if output_device.is_empty() {
                     if audio_device.is_empty() {
                         None
@@ -313,6 +315,54 @@ pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
 pub fn get_cpu_load(state: State<'_, AppState>) -> f64 {
     let raw = state.cpu_load.load(std::sync::atomic::Ordering::Relaxed);
     raw as f64 / 1000.0
+}
+
+/// Live audio I/O status for the UI: backend, latency, xruns, input health.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct AudioStatus {
+    pub running: bool,
+    pub backend: String,
+    pub latency_ms: f64,
+    pub underruns: u64,
+    pub overruns: u64,
+    pub callback_frames: u64,
+    pub input_ok: bool,
+    pub input_error: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_audio_status(state: State<'_, AppState>) -> AudioStatus {
+    if let Ok(io) = state.audio_io.lock() {
+        if let Some(ref io) = *io {
+            if io.is_active() {
+                let s = io.stats();
+                return AudioStatus {
+                    running: true,
+                    backend: "Cpal".into(),
+                    latency_ms: io.latency_ms(),
+                    underruns: s.underruns,
+                    overruns: s.overruns,
+                    callback_frames: s.last_callback_frames,
+                    input_ok: s.input_ok,
+                    input_error: s.input_error,
+                };
+            }
+        }
+    }
+    if let Ok(io) = state.jack_audio_io.lock() {
+        if let Some(ref io) = *io {
+            if io.is_active() {
+                return AudioStatus {
+                    running: true,
+                    backend: "Jack".into(),
+                    latency_ms: io.latency_ms(),
+                    input_ok: true,
+                    ..Default::default()
+                };
+            }
+        }
+    }
+    AudioStatus::default()
 }
 
 /// Set a named parameter on the active engine.

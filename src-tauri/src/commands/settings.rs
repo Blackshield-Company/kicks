@@ -9,6 +9,11 @@ use tauri::State;
 use crate::AppState;
 
 /// Serializable settings payload for the frontend.
+///
+/// Audio-routing fields default when absent so an older frontend payload
+/// still deserialises (previously `save_settings` rejected the frontend's
+/// payload outright because it never sent `audio_backend`/`input_device`/
+/// `output_device`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SettingsPayload {
     pub guitarix_host: String,
@@ -17,14 +22,19 @@ pub struct SettingsPayload {
     pub jack_client_name: String,
 
     // Audio backend
+    #[serde(default)]
     pub audio_backend: String,
 
     // CPAL audio device settings
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub audio_device: String,
+    #[serde(default)]
     pub input_device: String,
+    #[serde(default)]
     pub output_device: String,
+    #[serde(default)]
+    pub input_channel: u16,
 
     pub ir_directories: Vec<String>,
     pub nam_directories: Vec<String>,
@@ -50,6 +60,7 @@ impl From<&KicksConfig> for SettingsPayload {
             audio_device: cfg.audio_device.clone(),
             input_device: cfg.input_device.clone(),
             output_device: cfg.output_device.clone(),
+            input_channel: cfg.input_channel,
             ir_directories: cfg.ir_directories.clone(),
             nam_directories: cfg.nam_directories.clone(),
             preset_directories: cfg.preset_directories.clone(),
@@ -76,7 +87,7 @@ pub fn get_settings(state: State<'_, AppState>) -> SettingsPayload {
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> Result<(), String> {
     // ── 1. Snapshot old audio config and detect changes ──
-    let (old_sr, old_bs, old_dev, old_in, old_out, old_backend) = {
+    let (old_sr, old_bs, old_dev, old_in, old_out, old_backend, old_ch) = {
         let cfg = state.config.lock().map_err(|e| e.to_string())?;
         (
             cfg.sample_rate,
@@ -85,6 +96,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
             cfg.input_device.clone(),
             cfg.output_device.clone(),
             cfg.audio_backend.clone(),
+            cfg.input_channel,
         )
     };
     let new_backend = match settings.audio_backend.as_str() {
@@ -96,7 +108,8 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
         || old_dev != settings.audio_device
         || old_in != settings.input_device
         || old_out != settings.output_device
-        || old_backend != new_backend;
+        || old_backend != new_backend
+        || old_ch != settings.input_channel;
 
     // ── 2. Apply all changes to the in-memory config ──
     {
@@ -112,6 +125,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
         config.audio_device = settings.audio_device.clone();
         config.input_device = settings.input_device.clone();
         config.output_device = settings.output_device.clone();
+        config.input_channel = settings.input_channel;
 
         config.ir_directories = settings.ir_directories;
         config.nam_directories = settings.nam_directories;
@@ -203,6 +217,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
                     let audio_config = AudioConfig {
                         sample_rate: sr,
                         buffer_size: bs,
+                        input_channel: settings.input_channel,
                         output_device: if output_device.is_empty() {
                             if audio_device.is_empty() {
                                 None
@@ -269,4 +284,36 @@ pub fn list_audio_devices() -> Vec<kicks_dsp::DeviceInfo> {
 #[tauri::command]
 pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_without_audio_routing_fields_deserialises() {
+        // Shape the frontend sent before this change.
+        let json = serde_json::json!({
+            "guitarix_host": "127.0.0.1", "guitarix_port": 4040,
+            "engine_mode": "Auto", "jack_client_name": "kicks",
+            "sample_rate": 48000, "buffer_size": 256, "audio_device": "",
+            "ir_directories": [], "nam_directories": [], "preset_directories": [],
+            "ai_provider": "Anthropic", "ai_endpoint_url": "", "ai_api_key": "",
+            "ai_model": "m"
+        });
+        let p: SettingsPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(p.audio_backend, "");
+        assert_eq!(p.input_channel, 0);
+    }
+
+    #[test]
+    fn payload_round_trips_input_channel() {
+        let cfg = KicksConfig {
+            input_channel: 1,
+            ..Default::default()
+        };
+        let p = SettingsPayload::from(&cfg);
+        assert_eq!(p.input_channel, 1);
+        assert_eq!(p.audio_backend, "Cpal");
+    }
 }

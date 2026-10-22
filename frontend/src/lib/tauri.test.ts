@@ -11,6 +11,7 @@ import {
   listAudioDevices,
   listScenes,
   listAmpPresets,
+  getAudioStatus,
 } from './tauri';
 
 describe('tauri API simulation (outside Tauri)', () => {
@@ -67,5 +68,19 @@ describe('tauri API simulation (outside Tauri)', () => {
     expect(presets[0]).toHaveProperty('name');
     expect(presets[0]).toHaveProperty('gain');
     expect(presets[0]).toHaveProperty('tags');
+  });
+
+  it('getSettings includes audio routing fields', async () => {
+    const s = await getSettings();
+    expect(s.audio_backend).toBe('Cpal');
+    expect(s.input_channel).toBe(0);
+    expect(s.input_device).toBe('');
+    expect(s.output_device).toBe('');
+  });
+
+  it('getAudioStatus reports stopped audio outside Tauri', async () => {
+    const st = await getAudioStatus();
+    expect(st.running).toBe(false);
+    expect(st.underruns).toBe(0);
   });
 });
