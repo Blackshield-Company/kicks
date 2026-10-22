@@ -16,8 +16,6 @@ use crate::AppState;
 /// `output_device`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SettingsPayload {
-    pub guitarix_host: String,
-    pub guitarix_port: u16,
     pub engine_mode: String,
     pub jack_client_name: String,
 
@@ -50,8 +48,6 @@ pub struct SettingsPayload {
 impl From<&KicksConfig> for SettingsPayload {
     fn from(cfg: &KicksConfig) -> Self {
         Self {
-            guitarix_host: cfg.guitarix_host.clone(),
-            guitarix_port: cfg.guitarix_port,
             engine_mode: format!("{:?}", cfg.active_engine),
             jack_client_name: cfg.jack_client_name.clone(),
             audio_backend: format!("{:?}", cfg.audio_backend),
@@ -115,8 +111,6 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
     {
         let mut config = state.config.lock().map_err(|e| e.to_string())?;
 
-        config.guitarix_host = settings.guitarix_host;
-        config.guitarix_port = settings.guitarix_port;
         config.jack_client_name = settings.jack_client_name;
 
         config.audio_backend = new_backend;
@@ -133,7 +127,6 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
 
         config.active_engine = match settings.engine_mode.as_str() {
             "Internal" => EngineMode::Internal,
-            "Guitarix" => EngineMode::Guitarix,
             "Auto" => EngineMode::Auto,
             _ => EngineMode::Auto,
         };

@@ -7,8 +7,8 @@ Changes are saved to `~/.config/kicks/config.json` and applied immediately.
 
 | Setting | Options | Description |
 |---------|---------|-------------|
-| **Engine Mode** | Auto / Internal / Guitarix | Auto: tries Internal first, falls back to Guitarix. Internal: native DSP. Guitarix: remote control via JSON-RPC |
-| **JACK Client Name** | text | Client name used when connecting to JACK (Guitarix mode) |
+| **Engine Mode** | Auto / Internal | Both use the native kicks-dsp engine |
+| **JACK Client Name** | text | Client name used when connecting to JACK (JACK backend) |
 
 ## Audio Device
 
@@ -33,18 +33,6 @@ parameters, IR, etc.) is preserved — no manual stop/start needed.
 | 256 | ~5.3ms | Low | General use (default) |
 | 512 | ~10.7ms | Very Low | Heavy plugin chains |
 | 1024 | ~21ms | Minimal | Mixing, high track counts |
-
-## Guitarix Connection
-
-Settings for connecting to a running Guitarix instance:
-
-- **Host** — default: `127.0.0.1`
-- **Port** — default: `4040`
-
-Start Guitarix in headless mode:
-```bash
-guitarix -N -p 4040
-```
 
 ## AI Tone Assistant
 

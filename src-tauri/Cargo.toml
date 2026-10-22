@@ -34,6 +34,5 @@ walkdir.workspace = true
 midir.workspace = true
 reqwest.workspace = true
 
-guitarix-rpc = { path = "../crates/guitarix-rpc" }
 kicks-core = { path = "../crates/kicks-core" }
 kicks-dsp = { path = "../crates/kicks-dsp", features = ["cpal-backend"] }

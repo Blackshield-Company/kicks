@@ -46,8 +46,6 @@ export interface IrFileInfo {
 
 /** Settings payload */
 export interface SettingsPayload {
-  guitarix_host: string;
-  guitarix_port: number;
   engine_mode: string;
   jack_client_name: string;
   sample_rate: number;

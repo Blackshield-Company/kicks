@@ -35,7 +35,7 @@ finish-args:
   - --socket=fallback-x11
   - --device=dri
   - --share=ipc
-  # Network (for AI tone assistant + guitarix RPC)
+  # Network (for AI tone assistant)
   - --share=network
   # Filesystem (user presets, IRs, config)
   - --filesystem=home

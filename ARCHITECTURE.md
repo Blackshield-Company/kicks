@@ -3,51 +3,33 @@
 ## Crate Hierarchy
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Tauri Shell                        │
-│                  src-tauri (app)                      │
-│    Window management, IPC commands, menu, tray        │
-│              Depends on: all crates                   │
-└──────────────┬──────────────────────────────┬────────┘
-               │                              │
-               ▼                              ▼
-┌──────────────────────┐    ┌──────────────────────────────┐
-│   guitarix-rpc        │    │      kicks-dsp                │
-│   JSON-RPC 2.0 client │    │  Real-time audio engine       │
-│   Guitarix control     │    │  CPAL I/O + ringbuf + DSP     │
-│   ─────────────────    │    │  ─────────────────            │
-│   GuitarixClient       │    │  AudioEngine trait            │
-│   Parameter queries    │    │  CpalAudioIO (full-duplex)    │
-│   Preset management    │    │  JackAudioIO (feature-gated)  │
-│   Bank operations      │    │  Boost, Amp, Cab, ...         │
-└──────────────────────┘    └──────────────────────────────┘
-               │                              │
-               └──────────┬───────────────────┘
-                          ▼
-               ┌──────────────────────┐
-               │     kicks-core        │
-               │  Shared data models   │
-               │  ─────────────────    │
-               │  SignalChain model    │
-               │  Preset/Bank types    │
-               │  MIDI config types    │
-               │  App config           │
-               └──────────────────────┘
+┌─────────────────────────────────────────────┐
+│                 Tauri Shell                  │
+│               src-tauri (app)                │
+│   Window management, IPC commands, menu      │
+└──────────────────────┬──────────────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │          kicks-dsp            │
+        │  Real-time audio engine       │
+        │  CPAL / JACK I/O, plugins,    │
+        │  NAM, convolution, recorder   │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │          kicks-core           │
+        │  SignalChain, presets, MIDI   │
+        │  config, app config           │
+        └──────────────────────────────┘
 ```
 
-## Engine Modes
+## Engine
 
-Kicks supports two audio processing backends, selectable at runtime:
-
-1. **Guitarix Mode** — Routes audio through a running Guitarix engine via
-   JSON-RPC. Kicks acts as a smart remote control. Requires `guitarix -N -p 4040`
-   running in the background.
-
-2. **Internal Mode** — Uses the kicks-dsp crate for native real-time processing.
-   CPAL audio I/O (ALSA/PipeWire on Linux, CoreAudio on macOS) with embedded DSP
-   plugins. JACK client also available as feature-gated alternative.
-
-3. **Auto Mode** — Attempts internal first, falls back to Guitarix.
+Kicks processes audio natively with the kicks-dsp crate: CPAL audio I/O
+(ALSA/PipeWire on Linux) with embedded DSP plugins, and a JACK client as a
+feature-gated alternative. The `Auto` and `Internal` engine modes both select
+this engine. (An earlier Guitarix remote-control mode was never wired up and
+has been removed.)
 
 ## Data Flow
 
@@ -57,9 +39,7 @@ User Input (UI)
      ▼
 Tauri IPC Commands (src-tauri/src/commands/)
      │
-     ├── Guitarix Mode ──► guitarix-rpc ──► Guitarix Engine ──► JACK/PipeWire
-     │
-     └── Internal Mode ──► kicks-dsp (CpalAudioIO)
+     └── kicks-dsp (CpalAudioIO / JackAudioIO)
                              │
                     Input callback → ringbuf
                              │

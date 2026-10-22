@@ -47,7 +47,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "src-tauri -> target\ncrates/kicks-core -> target\ncrates/kicks-dsp -> target\ncrates/guitarix-rpc -> target"
+          workspaces: "src-tauri -> target\ncrates/kicks-core -> target\ncrates/kicks-dsp -> target"
 
       - name: Check formatting
         run: cargo fmt --check
@@ -110,7 +110,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "src-tauri -> target\ncrates/kicks-core -> target\ncrates/kicks-dsp -> target\ncrates/guitarix-rpc -> target"
+          workspaces: "src-tauri -> target\ncrates/kicks-core -> target\ncrates/kicks-dsp -> target"
 
       - name: Cache cargo tools
         uses: actions/cache@v4

@@ -90,7 +90,6 @@ export function Settings() {
             >
               <option value="Auto">Auto</option>
               <option value="Internal">Internal</option>
-              <option value="Guitarix">Guitarix</option>
             </select>
           </label>
           <label className="flex items-center justify-between">
@@ -234,31 +233,6 @@ export function Settings() {
             )}
           </div>
           <RecordControl />
-        </div>
-      </section>
-
-      {/* Guitarix Connection */}
-      <section className="border border-[var(--border)] rounded-xl p-4 bg-[var(--bg-surface)]">
-        <h3 className="text-sm font-medium text-[var(--text)] mb-3">Guitarix Connection</h3>
-        <div className="flex flex-col gap-3">
-          <label className="flex items-center justify-between">
-            <span className="text-sm text-[var(--text)]">Host</span>
-            <input
-              type="text"
-              value={settings.guitarix_host}
-              onChange={(e) => updateSetting('guitarix_host', e.target.value)}
-              className="w-40 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
-          <label className="flex items-center justify-between">
-            <span className="text-sm text-[var(--text)]">Port</span>
-            <input
-              type="number"
-              value={settings.guitarix_port}
-              onChange={(e) => updateSetting('guitarix_port', parseInt(e.target.value) || 4040)}
-              className="w-40 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
         </div>
       </section>
 

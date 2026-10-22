@@ -39,7 +39,6 @@ kicks/
 ├── crates/
 │   ├── kicks-core/      # Domain models, config, persistence, presets
 │   ├── kicks-dsp/       # Real-time audio DSP engine (plugins, audio I/O, NAM, convolution)
-│   └── guitarix-rpc/    # Guitarix JSON-RPC client (experimental, not yet used by the app)
 ├── src-tauri/           # Tauri application shell (commands, state management, menus)
 ├── frontend/            # React + Vite + Tailwind CSS + Zustand UI
 └── .github/workflows/   # CI/CD: clippy, tests, security audit, cross-platform releases
@@ -202,7 +201,6 @@ Apache License 2.0 — see [LICENSE](LICENSE) for details.
 
 - [Tauri](https://tauri.app/) — Secure, lightweight desktop apps with web tech
 - [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) — Open-source neural amp modeling
-- [Guitarix](https://guitarix.org/) — Guitar amp simulator and effects
 - [JACK Audio Connection Kit](https://jackaudio.org/) — Professional low-latency audio
 - [Tailwind CSS](https://tailwindcss.com/) — Utility-first CSS framework
 

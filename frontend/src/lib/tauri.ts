@@ -106,8 +106,6 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
       } as T;
     case 'get_settings':
       return {
-        guitarix_host: '127.0.0.1',
-        guitarix_port: 4040,
         engine_mode: 'Auto',
         jack_client_name: 'kicks',
         sample_rate: 48000,
