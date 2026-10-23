@@ -9,6 +9,7 @@ import { THEMES, applyTheme, getSavedThemeId, saveThemeId, getThemeById } from '
 export function Settings() {
   const { settings, loading, dirty, fetchSettings, saveSettings, updateSetting } =
     useSettingsStore();
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [activeTheme, setActiveTheme] = useState(getSavedThemeId());
   const [devices, setDevices] = useState<AudioDeviceInfo[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(true);
@@ -44,6 +45,16 @@ export function Settings() {
   const handleSave = useCallback(() => {
     if (settings) saveSettings(settings);
   }, [settings, saveSettings]);
+
+  const handlePickDirectory = async (key: 'ir_directories' | 'nam_directories') => {
+    setDirectoryError(null);
+    try {
+      const directory = await api.pickLibraryDirectory();
+      if (directory) updateSetting(key, [directory]);
+    } catch (err) {
+      setDirectoryError(typeof err === 'string' ? err : 'Failed to select directory');
+    }
+  };
 
   const handleThemeChange = useCallback((themeId: string) => {
     setActiveTheme(themeId);
@@ -90,7 +101,6 @@ export function Settings() {
             >
               <option value="Auto">Auto</option>
               <option value="Internal">Internal</option>
-              <option value="Guitarix">Guitarix</option>
             </select>
           </label>
           <label className="flex items-center justify-between">
@@ -237,31 +247,6 @@ export function Settings() {
         </div>
       </section>
 
-      {/* Guitarix Connection */}
-      <section className="border border-[var(--border)] rounded-xl p-4 bg-[var(--bg-surface)]">
-        <h3 className="text-sm font-medium text-[var(--text)] mb-3">Guitarix Connection</h3>
-        <div className="flex flex-col gap-3">
-          <label className="flex items-center justify-between">
-            <span className="text-sm text-[var(--text)]">Host</span>
-            <input
-              type="text"
-              value={settings.guitarix_host}
-              onChange={(e) => updateSetting('guitarix_host', e.target.value)}
-              className="w-40 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
-          <label className="flex items-center justify-between">
-            <span className="text-sm text-[var(--text)]">Port</span>
-            <input
-              type="number"
-              value={settings.guitarix_port}
-              onChange={(e) => updateSetting('guitarix_port', parseInt(e.target.value) || 4040)}
-              className="w-40 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
-        </div>
-      </section>
-
       {/* AI Assistant */}
       <section className="border border-[var(--border)] rounded-xl p-4 bg-[var(--bg-surface)]">
         <h3 className="text-sm font-medium text-[var(--text)] mb-3">AI Tone Assistant</h3>
@@ -371,24 +356,34 @@ export function Settings() {
       {/* File Directories */}
       <section className="border border-[var(--border)] rounded-xl p-4 bg-[var(--bg-surface)]">
         <h3 className="text-sm font-medium text-[var(--text)] mb-3">File Directories</h3>
+        <p className="text-xs text-[var(--text-muted)] mb-3">Folders chosen with the folder picker are remembered across restarts. Editing settings alone does not approve access.</p>
+        {directoryError && <p role="alert" className="text-sm text-[var(--danger)]">{directoryError}</p>}
         <div className="flex flex-col gap-3">
           <label className="flex items-center justify-between">
             <span className="text-sm text-[var(--text)]">IR Directory</span>
             <input
               type="text"
               value={settings.ir_directories[0] ?? ''}
-              onChange={(e) => updateSetting('ir_directories', [e.target.value])}
+              readOnly
               className="flex-1 ml-4 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
             />
+            <button type="button" onClick={() => handlePickDirectory('ir_directories')}
+              className="ml-2 px-3 py-2 rounded-lg bg-[var(--accent)] text-white text-sm cursor-pointer">
+              Choose IR Folder
+            </button>
           </label>
           <label className="flex items-center justify-between">
             <span className="text-sm text-[var(--text)]">NAM Directory</span>
             <input
               type="text"
               value={settings.nam_directories[0] ?? ''}
-              onChange={(e) => updateSetting('nam_directories', [e.target.value])}
+              readOnly
               className="flex-1 ml-4 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
             />
+            <button type="button" onClick={() => handlePickDirectory('nam_directories')}
+              className="ml-2 px-3 py-2 rounded-lg bg-[var(--accent)] text-white text-sm cursor-pointer">
+              Choose NAM Folder
+            </button>
           </label>
           <label className="flex items-center justify-between">
             <span className="text-sm text-[var(--text)]">Preset Directory</span>

@@ -611,7 +611,22 @@ impl NeuralModel {
             anyhow::bail!("NAM file not found: {}", path);
         }
 
-        let bytes = fs::read(file_path)?;
+        Self::from_reader(std::io::BufReader::new(fs::File::open(file_path)?))
+    }
+
+    /// Parse a NAM model from an already opened and validated source.
+    pub fn from_reader(reader: impl std::io::Read) -> anyhow::Result<(Self, usize)> {
+        Self::from_reader_capped(reader, 256 * 1024 * 1024)
+    }
+
+    fn from_reader_capped(reader: impl std::io::Read, cap: u64) -> anyhow::Result<(Self, usize)> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        reader.take(cap + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= cap,
+            "NAM file too large (limit {cap})"
+        );
         let nam: NamFile = serde_json::from_slice(&bytes)?;
 
         let sample_rate = nam.sample_rate.unwrap_or(48000);
@@ -685,6 +700,20 @@ impl NeuralModel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reader_cap_rejects_trailing_growth_without_reading_to_eof() {
+        let json = br#"{"architecture":"Linear","config":{},"weights":[]}"#;
+        assert!(super::NeuralModel::from_reader_capped(&json[..], json.len() as u64).is_ok());
+        let mut bytes = json.to_vec();
+        bytes.extend_from_slice(b"      ");
+        let mut source = std::io::Cursor::new(bytes);
+        let err = super::NeuralModel::from_reader_capped(&mut source, json.len() as u64)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("too large"));
+        assert_eq!(source.position(), json.len() as u64 + 1);
+    }
+
     use super::*;
 
     fn test_buffer(size: usize) -> Vec<f32> {

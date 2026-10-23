@@ -16,12 +16,19 @@ A modern, open-source guitar amp simulator and effects workstation built with **
 | **Amp Modeling** | Built-in amp & cabinet simulation with boost, drive, EQ (bass/mid/treble), and master volume |
 | **IR Loader** | Load custom impulse responses (WAV) into the Cab slot for realistic cabinet simulation |
 | **NAM Models** | Load [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) models for state-of-the-art neural amp emulation |
-| **Effects** | Delay and reverb with wet/dry mix and parameter control |
+| **Effects** | Noise gate, compressor, parametric EQ, overdrive, chorus, flanger, phaser, tremolo, delay and reverb, each with bypass and wet/dry mix |
+| **Recording** | Record a stereo WAV with the dry DI on the left channel and the processed signal on the right, for later re-amping |
 | **AI Assistant** | Generate tones from text descriptions using Claude (Anthropic API) — "Give me a SRV-style Texas blues tone" |
-| **MIDI Control** | Map CC controllers to any parameter, with learn mode for easy assignment |
+| **MIDI Control** | Map CC controllers to any parameter, with learn mode. CCs are applied on the MIDI thread through the lock-free parameter queue, so control keeps working while the UI is busy. CC only (no program change or notes yet) |
 | **Live Scenes** | Save and switch between full signal chains instantly for gigging and recording |
 | **Presets** | Organize tones into banks with tags, descriptions, and searchable metadata |
-| **Cross-Platform** | Native builds for Linux (AppImage/deb), macOS (universal .dmg), and Windows (.msi/.exe) |
+| **Platforms** | Linux is the supported, tested platform (AppImage/deb; JACK or PipeWire/ALSA). The release job also produces macOS and Windows bundles, but they are untested and should be treated as experimental |
+
+### Security notes
+
+- File commands only read IR/NAM files inside folders approved through the native folder picker, or files picked in the file dialog. Folder grants survive restarts in the native owner-only `granted_dirs.json` store; startup prunes missing, non-directory, or changed canonical paths. Settings values never grant access. Symlinks and `..` are resolved before the check.
+- The webview runs under a strict Content Security Policy (no `eval`, no inline scripts, network limited to the Tauri IPC).
+- The AI API key is stored in `config.json` in the Kicks config directory, which is written owner-only (mode 0600). It is not yet in the OS keyring.
 
 ---
 
@@ -32,7 +39,6 @@ kicks/
 ├── crates/
 │   ├── kicks-core/      # Domain models, config, persistence, presets
 │   ├── kicks-dsp/       # Real-time audio DSP engine (plugins, audio I/O, NAM, convolution)
-│   └── guitarix-rpc/    # Guitarix integration via RPC
 ├── src-tauri/           # Tauri application shell (commands, state management, menus)
 ├── frontend/            # React + Vite + Tailwind CSS + Zustand UI
 └── .github/workflows/   # CI/CD: clippy, tests, security audit, cross-platform releases
@@ -145,7 +151,7 @@ The real-time audio pipeline is built on **JACK** and **CPAL** with a plugin-bas
 | `Reverb` | Room reverb with size, damping, and mix controls |
 | `Output` | Master volume and output level |
 
-**Audio I/O:** JACK (Linux, pro-audio) and CPAL (cross-platform, WASAPI/CoreAudio/PipeWire)
+**Audio I/O:** JACK (Linux, pro-audio) and CPAL (PipeWire/ALSA on Linux; CoreAudio/WASAPI backends compile but are untested)
 
 ---
 
@@ -195,7 +201,6 @@ Apache License 2.0 — see [LICENSE](LICENSE) for details.
 
 - [Tauri](https://tauri.app/) — Secure, lightweight desktop apps with web tech
 - [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) — Open-source neural amp modeling
-- [Guitarix](https://guitarix.org/) — Guitar amp simulator and effects
 - [JACK Audio Connection Kit](https://jackaudio.org/) — Professional low-latency audio
 - [Tailwind CSS](https://tailwindcss.com/) — Utility-first CSS framework
 

@@ -28,7 +28,9 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
     let mut results = Vec::new();
 
     for dir in &config.nam_directories {
-        let path = std::path::PathBuf::from(dir);
+        let Ok(path) = crate::path_guard::check_dir(dir, &state.path_grants) else {
+            continue;
+        };
         if !path.exists() {
             continue;
         }
@@ -37,7 +39,14 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let fpath = entry.path();
+            let Ok((fpath, _file)) = crate::path_guard::check_file(
+                &entry.path().to_string_lossy(),
+                &state.path_grants,
+                &["nam"],
+                crate::path_guard::MAX_NAM_BYTES,
+            ) else {
+                continue;
+            };
             let ext = fpath
                 .extension()
                 .and_then(|e| e.to_str())
@@ -68,19 +77,21 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
 pub fn scan_nam_directory(
     state: State<'_, AppState>, dir_path: String,
 ) -> Result<Vec<NamFileInfo>, String> {
-    let _config = state.config.lock().map_err(|e| e.to_string())?;
+    let path = crate::path_guard::check_dir(&dir_path, &state.path_grants)?;
     let mut results = Vec::new();
-    let path = std::path::PathBuf::from(&dir_path);
-
-    if !path.exists() {
-        return Err(format!("Directory '{}' does not exist", dir_path));
-    }
 
     let entries =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in entries.flatten() {
-        let fpath = entry.path();
+        let Ok((fpath, _file)) = crate::path_guard::check_file(
+            &entry.path().to_string_lossy(),
+            &state.path_grants,
+            &["nam"],
+            crate::path_guard::MAX_NAM_BYTES,
+        ) else {
+            continue;
+        };
         let ext = fpath
             .extension()
             .and_then(|e| e.to_str())
@@ -110,18 +121,23 @@ pub fn scan_nam_directory(
 pub fn load_nam_model(
     state: State<'_, AppState>, path: String,
 ) -> Result<NamModelLoadResult, String> {
-    let fpath = std::path::Path::new(&path);
-    if !fpath.exists() {
-        return Err(format!("File not found: {}", path));
-    }
+    let (resolved, file) = crate::path_guard::check_file(
+        &path,
+        &state.path_grants,
+        &["nam"],
+        crate::path_guard::MAX_NAM_BYTES,
+    )?;
+    let path = resolved.to_string_lossy().into_owned();
+    let fpath = resolved.as_path();
 
     let file_name = fpath
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let (neural_model, num_parameters) = kicks_dsp::NeuralModel::from_file(&path)
-        .map_err(|e| format!("Failed to load NAM model: {}", e))?;
+    let (neural_model, num_parameters) =
+        kicks_dsp::NeuralModel::from_reader(std::io::BufReader::new(file))
+            .map_err(|e| format!("Failed to load NAM model: {}", e))?;
 
     let architecture = neural_model.architecture().to_string();
     let sample_rate = neural_model.sample_rate();

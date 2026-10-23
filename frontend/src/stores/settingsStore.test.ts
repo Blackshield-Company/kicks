@@ -28,8 +28,6 @@ describe('useSettingsStore', () => {
 
   it('fetchSettings loads settings', async () => {
     const payload = {
-      guitarix_host: '127.0.0.1',
-      guitarix_port: 4040,
       engine_mode: 'Auto',
       jack_client_name: 'kicks',
       sample_rate: 48000,
@@ -55,8 +53,6 @@ describe('useSettingsStore', () => {
 
   it('saveSettings sends payload to backend', async () => {
     const payload = {
-      guitarix_host: '192.168.1.1',
-      guitarix_port: 8080,
       engine_mode: 'Manual',
       jack_client_name: 'kicks-test',
       sample_rate: 44100,
@@ -82,8 +78,6 @@ describe('useSettingsStore', () => {
 
   it('updateSetting mutates local state and marks dirty', () => {
     const base = {
-      guitarix_host: '127.0.0.1',
-      guitarix_port: 4040,
       engine_mode: 'Auto',
       jack_client_name: 'kicks',
       sample_rate: 48000,
@@ -99,14 +93,14 @@ describe('useSettingsStore', () => {
     };
     useSettingsStore.setState({ settings: base });
 
-    useSettingsStore.getState().updateSetting('guitarix_port', 9090);
+    useSettingsStore.getState().updateSetting('buffer_size', 512);
 
-    expect(useSettingsStore.getState().settings?.guitarix_port).toBe(9090);
+    expect(useSettingsStore.getState().settings?.buffer_size).toBe(512);
     expect(useSettingsStore.getState().dirty).toBe(true);
   });
 
   it('updateSetting does nothing when settings are null', () => {
-    useSettingsStore.getState().updateSetting('guitarix_port', 9090);
+    useSettingsStore.getState().updateSetting('buffer_size', 512);
     expect(useSettingsStore.getState().settings).toBeNull();
     expect(useSettingsStore.getState().dirty).toBe(false);
   });

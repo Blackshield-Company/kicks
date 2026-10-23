@@ -7,7 +7,7 @@ license.workspace = true
 repository = "https://github.com/synthalorian/kicks"
 homepage = "https://github.com/synthalorian/kicks"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.89"
 
 [lib]
 name = "app_lib"
@@ -17,6 +17,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+getrandom = "0.3"
+dirs = "=6.0.0"
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
@@ -34,6 +36,11 @@ walkdir.workspace = true
 midir.workspace = true
 reqwest.workspace = true
 
-guitarix-rpc = { path = "../crates/guitarix-rpc" }
 kicks-core = { path = "../crates/kicks-core" }
 kicks-dsp = { path = "../crates/kicks-dsp", features = ["cpal-backend"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }

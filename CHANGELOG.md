@@ -2,6 +2,12 @@
 
 All notable changes to Kicks Guitar Workstation will be documented in this file.
 
+## [Unreleased]
+
+### Removed
+
+- `guitarix-rpc` crate and the Guitarix engine mode / connection settings. They were never wired into the app. Saved configs using the Guitarix mode load as Internal.
+
 ## [0.1.0] — 2025-05-31
 
 ### ✨ Features

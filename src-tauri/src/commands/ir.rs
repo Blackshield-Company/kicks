@@ -1,5 +1,4 @@
 use crate::sync::LockOrRecover;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tauri::{State, Wry};
@@ -25,7 +24,9 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
     let mut results = Vec::new();
 
     for dir in &config.ir_directories {
-        let path = PathBuf::from(dir);
+        let Ok(path) = crate::path_guard::check_dir(dir, &state.path_grants) else {
+            continue;
+        };
         if !path.exists() {
             continue;
         }
@@ -34,7 +35,14 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let fpath = entry.path();
+            let Ok((fpath, file)) = crate::path_guard::check_file(
+                &entry.path().to_string_lossy(),
+                &state.path_grants,
+                &["wav", "irs", "nam"],
+                crate::path_guard::MAX_IR_BYTES,
+            ) else {
+                continue;
+            };
             let ext = fpath
                 .extension()
                 .and_then(|e| e.to_str())
@@ -51,7 +59,7 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
                 .unwrap_or_default();
 
             // Try to parse WAV files for metadata
-            let info = match parse_wav_metadata(&fpath) {
+            let info = match parse_wav_metadata_handle(file) {
                 Some(meta) => IrFileInfo {
                     path: fpath.to_string_lossy().to_string(),
                     name,
@@ -83,7 +91,9 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
 
 /// Open a file dialog to pick an IR file, returning its metadata.
 #[tauri::command]
-pub async fn pick_ir_file(app: tauri::AppHandle<Wry>) -> Result<Option<IrFileInfo>, String> {
+pub async fn pick_ir_file(
+    app: tauri::AppHandle<Wry>, state: State<'_, AppState>,
+) -> Result<Option<IrFileInfo>, String> {
     let file = app
         .dialog()
         .file()
@@ -96,12 +106,19 @@ pub async fn pick_ir_file(app: tauri::AppHandle<Wry>) -> Result<Option<IrFileInf
         Some(path) => {
             let path_str = path.to_string();
             let path = std::path::PathBuf::from(&path_str);
+            state.path_grants.grant(&path);
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            let info = match parse_wav_metadata(&path) {
+            let (_, file) = crate::path_guard::check_file(
+                &path_str,
+                &state.path_grants,
+                &["wav", "irs", "nam"],
+                crate::path_guard::MAX_IR_BYTES,
+            )?;
+            let info = match parse_wav_metadata_handle(file) {
                 Some((sample_rate, sample_count, channels)) => IrFileInfo {
                     path: path.to_string_lossy().to_string(),
                     name,
@@ -130,19 +147,9 @@ pub async fn pick_ir_file(app: tauri::AppHandle<Wry>) -> Result<Option<IrFileInf
     }
 }
 
-/// Parse a WAV file and return (sample_rate, sample_count, channels).
-fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-
-    if ext != "wav" {
-        return None;
-    }
-
-    let reader = hound::WavReader::open(path).ok()?;
+fn parse_wav_metadata_handle(file: std::fs::File) -> Option<(u32, u32, u16)> {
+    let file = crate::path_guard::read_capped(file, crate::path_guard::MAX_IR_BYTES).ok()?;
+    let reader = hound::WavReader::new(file).ok()?;
     let spec = reader.spec();
     let sample_count = reader.duration();
     let channels = spec.channels;
@@ -154,15 +161,18 @@ fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
 /// Load an impulse response file into the Cab plugin.
 #[tauri::command]
 pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoadResult, String> {
-    // Validate file exists
-    let fpath = std::path::Path::new(&path);
-    if !fpath.exists() {
-        return Err(format!("File not found: {}", path));
-    }
+    let (fpath, file) = crate::path_guard::check_file(
+        &path,
+        &state.path_grants,
+        &["wav"],
+        crate::path_guard::MAX_IR_BYTES,
+    )?;
+    let fpath = fpath.as_path();
 
     // Read WAV file and extract float samples
+    let file = crate::path_guard::read_capped(file, crate::path_guard::MAX_IR_BYTES)?;
     let mut reader =
-        hound::WavReader::open(fpath).map_err(|e| format!("Failed to open WAV: {}", e))?;
+        hound::WavReader::new(file).map_err(|e| format!("Failed to open WAV: {}", e))?;
     let spec = reader.spec();
 
     let sample_rate = spec.sample_rate as f32;
@@ -316,19 +326,21 @@ pub fn clear_cab_ir(state: State<'_, AppState>) -> Result<(), String> {
 pub fn scan_ir_directory(
     state: State<'_, AppState>, dir_path: String,
 ) -> Result<Vec<IrFileInfo>, String> {
-    let _config = state.config.lock().map_err(|e| e.to_string())?;
+    let path = crate::path_guard::check_dir(&dir_path, &state.path_grants)?;
     let mut results = Vec::new();
-    let path = PathBuf::from(&dir_path);
-
-    if !path.exists() {
-        return Err(format!("Directory '{}' does not exist", dir_path));
-    }
 
     let entries =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in entries.flatten() {
-        let fpath = entry.path();
+        let Ok((fpath, file)) = crate::path_guard::check_file(
+            &entry.path().to_string_lossy(),
+            &state.path_grants,
+            &["wav", "irs", "nam"],
+            crate::path_guard::MAX_IR_BYTES,
+        ) else {
+            continue;
+        };
         let ext = fpath
             .extension()
             .and_then(|e| e.to_str())
@@ -344,7 +356,7 @@ pub fn scan_ir_directory(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let info = match parse_wav_metadata(&fpath) {
+        let info = match parse_wav_metadata_handle(file) {
             Some((sample_rate, sample_count, channels)) => IrFileInfo {
                 path: fpath.to_string_lossy().to_string(),
                 name,

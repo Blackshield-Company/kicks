@@ -14,6 +14,7 @@ use tauri::Manager;
 mod ai;
 mod commands;
 mod midi;
+mod path_guard;
 mod sync;
 
 /// Maximum number of undo/redo steps to keep.
@@ -29,12 +30,12 @@ pub struct AppState {
     pub jack_audio_io: Mutex<Option<JackAudioIO>>,
     /// Lock-free parameter channel: main thread pushes, audio callback drains.
     /// Created when the engine starts, cleared when it stops.
-    pub param_tx: Mutex<Option<ParamSender>>,
+    pub param_tx: Arc<Mutex<Option<ParamSender>>>,
     pub signal_chain: Mutex<SignalChain>,
     pub presets: Mutex<PresetCollection>,
     pub scenes: Mutex<SceneCollection>,
     pub config: Mutex<KicksConfig>,
-    pub midi_config: Mutex<MidiConfig>,
+    pub midi_config: Arc<Mutex<MidiConfig>>,
     pub midi_manager: Mutex<midi::MidiManager>,
     /// Stack of previous signal chain states for undo (newest first).
     pub undo_chain: Mutex<Vec<SignalChain>>,
@@ -44,6 +45,8 @@ pub struct AppState {
     pub cpu_load: Arc<AtomicU64>,
     /// Active WAV recording (DI + processed), if any.
     pub recording: Mutex<Option<kicks_dsp::recorder::Recording>>,
+    /// Native picker grants, independent of writable settings.
+    pub path_grants: path_guard::PathGrants,
 }
 
 #[cfg(test)]
@@ -54,17 +57,18 @@ impl AppState {
             engine: Mutex::new(None),
             audio_io: Mutex::new(None),
             jack_audio_io: Mutex::new(None),
-            param_tx: Mutex::new(None),
+            param_tx: Arc::new(Mutex::new(None)),
             signal_chain: Mutex::new(SignalChain::default()),
             presets: Mutex::new(PresetCollection::default()),
             scenes: Mutex::new(SceneCollection::default()),
             config: Mutex::new(KicksConfig::default()),
-            midi_config: Mutex::new(MidiConfig::default()),
+            midi_config: Arc::new(Mutex::new(MidiConfig::default())),
             midi_manager: Mutex::new(midi::MidiManager::new()),
             undo_chain: Mutex::new(Vec::new()),
             redo_chain: Mutex::new(Vec::new()),
             cpu_load: Arc::new(AtomicU64::new(0)),
             recording: Mutex::new(None),
+            path_grants: path_guard::PathGrants::default(),
         }
     }
 }
@@ -111,17 +115,20 @@ pub fn run() {
             engine: Mutex::new(None),
             audio_io: Mutex::new(None),
             jack_audio_io: Mutex::new(None),
-            param_tx: Mutex::new(None),
+            param_tx: Arc::new(Mutex::new(None)),
             signal_chain: Mutex::new(signal_chain),
             presets: Mutex::new(presets),
             scenes: Mutex::new(scenes),
             config: Mutex::new(config),
-            midi_config: Mutex::new(midi_config),
+            midi_config: Arc::new(Mutex::new(midi_config)),
             midi_manager: Mutex::new(midi::MidiManager::new()),
             undo_chain: Mutex::new(Vec::new()),
             redo_chain: Mutex::new(Vec::new()),
             cpu_load: Arc::new(AtomicU64::new(0)),
             recording: Mutex::new(None),
+            path_grants: path_guard::PathGrants::with_store(
+                persistence::config_dir().join("granted_dirs.json"),
+            ),
         })
         .setup(|app| {
             // NOTE: tauri_plugin_log is intentionally NOT registered here —
@@ -164,6 +171,7 @@ pub fn run() {
             commands::presets::rename_preset,
             // IR Browser & Loading
             commands::ir::list_ir_files,
+            commands::settings::pick_library_directory,
             commands::ir::pick_ir_file,
             commands::ir::scan_ir_directory,
             commands::ir::load_ir_to_cab,

@@ -20,10 +20,6 @@ impl AiProvider {
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KicksConfig {
-    /// Guitarix RPC connection settings.
-    pub guitarix_host: String,
-    pub guitarix_port: u16,
-
     /// Audio engine selection.
     pub active_engine: EngineMode,
 
@@ -62,9 +58,7 @@ pub struct KicksConfig {
 impl Default for KicksConfig {
     fn default() -> Self {
         Self {
-            guitarix_host: "127.0.0.1".to_string(),
-            guitarix_port: 4040,
-            active_engine: EngineMode::Guitarix,
+            active_engine: EngineMode::Internal,
             jack_client_name: "kicks".to_string(),
             sample_rate: 48000,
             buffer_size: 256,
@@ -92,7 +86,9 @@ impl Default for KicksConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EngineMode {
-    Guitarix,
+    /// Native kicks-dsp engine. Configs saved with the removed `Guitarix`
+    /// mode load as this.
+    #[serde(alias = "Guitarix")]
     Internal,
     Auto,
 }
@@ -114,5 +110,27 @@ mod input_channel_tests {
         v.as_object_mut().unwrap().remove("input_channel");
         let cfg: KicksConfig = serde_json::from_value(v).unwrap();
         assert_eq!(cfg.input_channel, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_saved_with_guitarix_settings_still_loads() {
+        let mut v = serde_json::to_value(KicksConfig::default()).unwrap();
+        v["guitarix_host"] = "10.0.0.2".into();
+        v["guitarix_port"] = 4040.into();
+        v["active_engine"] = "Guitarix".into();
+        let cfg: KicksConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(cfg.active_engine, EngineMode::Internal);
+    }
+
+    #[test]
+    fn default_engine_is_internal() {
+        assert_eq!(KicksConfig::default().active_engine, EngineMode::Internal);
+        let s = serde_json::to_string(&KicksConfig::default()).unwrap();
+        assert!(!s.to_lowercase().contains("guitarix_"));
     }
 }

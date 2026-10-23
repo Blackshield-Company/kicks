@@ -35,7 +35,7 @@ finish-args:
   - --socket=fallback-x11
   - --device=dri
   - --share=ipc
-  # Network (for AI tone assistant + guitarix RPC)
+  # Network (for AI tone assistant)
   - --share=network
   # Filesystem (user presets, IRs, config)
   - --filesystem=home
@@ -109,7 +109,7 @@ modules:
             <category>Audio</category>
           </categories>
           <url type="homepage">https://github.com/synth/kicks</url>
-          <project_license>GPL-3.0-or-later</project_license>
+          <project_license>Apache-2.0</project_license>
         </component>
         METAINFO_EOF
 

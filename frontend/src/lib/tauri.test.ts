@@ -43,7 +43,7 @@ describe('tauri API simulation (outside Tauri)', () => {
 
   it('getSettings returns simulated defaults', async () => {
     const settings = await getSettings();
-    expect(settings.guitarix_host).toBe('127.0.0.1');
+    expect(settings).not.toHaveProperty('guitarix_host');
     expect(settings.engine_mode).toBe('Auto');
     expect(settings.ai_provider).toBe('Anthropic');
   });
