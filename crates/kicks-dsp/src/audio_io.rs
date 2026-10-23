@@ -111,7 +111,7 @@ impl CpalAudioIO {
 
             use crate::io_util::{
                 choose_buffer_size, clamp_channel, estimated_latency_ms, extract_channel,
-                write_mono_to_interleaved, AudioStats,
+                input_ring_capacity, write_mono_to_interleaved, AudioStats,
             };
             use std::sync::atomic::Ordering;
 
@@ -164,6 +164,18 @@ impl CpalAudioIO {
                 buffer_size: cpal_bs,
             };
 
+            // Input devices may have a different period range than output devices.
+            let in_default = input_device
+                .as_ref()
+                .map(|dev| dev.default_input_config())
+                .transpose()
+                .context("Input device has no default config")?;
+            let in_range = in_default.as_ref().and_then(|c| match c.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, max } => Some((*min, *max)),
+                cpal::SupportedBufferSize::Unknown => None,
+            });
+            let in_bs = choose_buffer_size(requested_bs, in_range);
+
             let stats = Arc::new(AudioStats::default());
             self.stats = stats.clone();
 
@@ -171,7 +183,17 @@ impl CpalAudioIO {
             // one period of silence so the first output callbacks don't
             // underrun while the input stream spins up.
             let prefill = bs as usize;
-            let ring = HeapRb::<f32>::new((bs as usize * 8).max(4096));
+            // Fixed periods are only requests in CPAL. Reserve for the reported
+            // input maximum, including when output uses an unknown default period.
+            // Without an input bound we cannot safely size a finite ring.
+            let capacity = if input_device.is_some() {
+                input_ring_capacity(bs, in_range)
+                    .context("Input device has no valid callback buffer bound")?
+            } else {
+                (bs as usize * 8).max(4096)
+            };
+            let ring =
+                HeapRb::<f32>::try_new(capacity).context("Failed to allocate input audio ring")?;
             let (mut producer, mut consumer) = ring.split();
             for _ in 0..prefill {
                 let _ = producer.try_push(0.0);
@@ -184,8 +206,8 @@ impl CpalAudioIO {
                     None
                 }
                 Some(dev) => {
-                    let in_channels = dev
-                        .default_input_config()
+                    let in_channels = in_default
+                        .as_ref()
                         .map(|c| c.channels())
                         .unwrap_or(1)
                         .max(1);
@@ -193,7 +215,8 @@ impl CpalAudioIO {
                     let in_config = cpal::StreamConfig {
                         channels: in_channels,
                         sample_rate: sr,
-                        buffer_size: cpal_bs,
+                        buffer_size: in_bs
+                            .map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed),
                     };
                     let mut prod = producer;
                     let in_stats = stats.clone();
