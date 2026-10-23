@@ -7,7 +7,7 @@ license.workspace = true
 repository = "https://github.com/synthalorian/kicks"
 homepage = "https://github.com/synthalorian/kicks"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.89"
 
 [lib]
 name = "app_lib"
@@ -36,3 +36,6 @@ reqwest.workspace = true
 
 kicks-core = { path = "../crates/kicks-core" }
 kicks-dsp = { path = "../crates/kicks-dsp", features = ["cpal-backend"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

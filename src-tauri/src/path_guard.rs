@@ -49,54 +49,108 @@ fn load_valid_roots(store: &Path) -> HashSet<PathBuf> {
     };
     let mut roots = HashSet::new();
     for path in stored {
-        match path.canonicalize() {
-            Ok(canonical) if canonical.as_os_str() == path.as_os_str() && canonical.is_dir() => {
-                roots.insert(canonical);
-            }
-            _ => tracing::warn!("Dropping invalid directory grant: {}", path.display()),
+        if is_valid_root(&path) {
+            roots.insert(path);
+        } else {
+            tracing::warn!("Dropping invalid directory grant: {}", path.display());
         }
     }
     roots
+}
+
+/// Under an exclusive cross-process lock, re-validate the stored roots, add
+/// `new_root` (already canonical) if given, and atomically rewrite the store.
+/// Returns the roots that were written.
+fn update_store(store: &Path, new_root: Option<&Path>) -> Result<HashSet<PathBuf>, String> {
+    let err = |e: std::io::Error| e.to_string();
+    if let Some(parent) = store.parent() {
+        std::fs::create_dir_all(parent).map_err(err)?;
+    }
+    let lock = open_private(&store.with_extension("lock"), false).map_err(err)?;
+    lock.lock().map_err(err)?;
+    let mut roots = load_valid_roots(store);
+    if let Some(root) = new_root {
+        if !is_valid_root(root) {
+            return Err("Directory changed before it could be granted".to_string());
+        }
+        roots.insert(root.to_path_buf());
+    }
+    let mut paths: Vec<_> = roots.iter().collect();
+    paths.sort();
+    let bytes = serde_json::to_vec_pretty(&paths).map_err(|e| e.to_string())?;
+    write_atomic(store, &bytes).map_err(err)?;
+    Ok(roots)
+    // `lock` is released when dropped here.
+}
+
+fn is_valid_root(path: &Path) -> bool {
+    matches!(path.canonicalize(), Ok(c) if c.as_os_str() == path.as_os_str() && c.is_dir())
+}
+
+fn open_private(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).write(true);
+    if create_new {
+        opts.create_new(true);
+    } else {
+        opts.create(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW: never follow a planted symlink at the lock/temp path.
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(path)
+}
+
+/// Write to a fresh, exclusively created temp file, then rename over `store`.
+/// The temp file is removed on every failure path.
+fn write_atomic(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    struct Cleanup<'a>(&'a Path, bool);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            if self.1 {
+                let _ = std::fs::remove_file(self.0);
+            }
+        }
+    }
+    loop {
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = store.with_extension(format!("{}.{}.tmp", std::process::id(), n));
+        let mut f = match open_private(&tmp, true) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let mut guard = Cleanup(&tmp, true);
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, store)?;
+        guard.1 = false;
+        return Ok(());
+    }
 }
 
 impl PathGrants {
     /// Load only unchanged canonical directory roots and rewrite the pruned store.
     /// This path is supplied by native startup code, never by an IPC argument.
     pub fn with_store(store: PathBuf) -> Self {
-        let roots = load_valid_roots(&store);
-        let grants = Self {
+        let roots = match update_store(&store, None) {
+            Ok(roots) => roots,
+            Err(e) => {
+                tracing::warn!("Could not rewrite directory grant store: {}", e);
+                load_valid_roots(&store)
+            }
+        };
+        Self {
             picked: Mutex::default(),
             roots: Mutex::new(roots),
             store: Some(store),
-        };
-        if let Err(e) = grants.persist(&grants.roots.lock_or_recover()) {
-            tracing::warn!("Could not rewrite directory grant store: {}", e);
         }
-        grants
-    }
-
-    fn persist(&self, roots: &HashSet<PathBuf>) -> Result<(), String> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
-        // Merge with roots another app instance may have written meanwhile,
-        // re-validating them exactly like startup does.
-        let mut merged = load_valid_roots(store);
-        merged.extend(roots.iter().cloned());
-        let mut paths: Vec<_> = merged.iter().collect();
-        paths.sort();
-        let bytes = serde_json::to_vec_pretty(&paths).map_err(|e| e.to_string())?;
-        if let Some(parent) = store.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = store.with_extension(format!("{}.{}.tmp", std::process::id(), n));
-        kicks_core::persistence::write_private(&tmp, &bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, store).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            e.to_string()
-        })
     }
 
     /// Record a dialog-picked file. Ignored if it cannot be resolved.
@@ -112,12 +166,16 @@ impl PathGrants {
         if !canonical.is_dir() {
             return Err("Not a directory".to_string());
         }
-        // Serialize mutation and persistence so concurrent picks cannot lose roots.
         let mut roots = self.roots.lock_or_recover();
-        let mut updated = roots.clone();
-        updated.insert(canonical.clone());
-        self.persist(&updated)?;
-        *roots = updated;
+        match &self.store {
+            // The store is the source of truth: write (re-validated disk roots
+            // + this one) under a cross-process lock, then adopt exactly that.
+            // Stale in-memory roots are never written back.
+            Some(store) => *roots = update_store(store, Some(&canonical))?,
+            None => {
+                roots.insert(canonical.clone());
+            }
+        }
         Ok(canonical)
     }
 
@@ -307,6 +365,75 @@ mod tests {
         let mut want = vec![lib, out];
         want.sort();
         assert_eq!(stored_roots(&store), want);
+        let leftovers = std::fs::read_dir(&t.0)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn overlapping_instances_never_lose_grants() {
+        let t = tmp("overlap");
+        let store = t.0.join("granted_dirs.json");
+        let dirs: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let d = t.0.join(format!("d{i}"));
+                std::fs::create_dir_all(&d).unwrap();
+                d.canonicalize().unwrap()
+            })
+            .collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(dirs.len()));
+        let handles: Vec<_> = dirs
+            .iter()
+            .cloned()
+            .map(|d| {
+                let (store, barrier) = (store.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    // Separate instances, as two app processes would have.
+                    let g = PathGrants::with_store(store);
+                    barrier.wait();
+                    g.grant_directory(&d).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let mut want = dirs.clone();
+        want.sort();
+        assert_eq!(stored_roots(&store), want);
+    }
+
+    #[test]
+    fn stale_memory_does_not_resurrect_a_root_pruned_elsewhere() {
+        let t = tmp("stale");
+        let store = t.0.join("granted_dirs.json");
+        let a = PathGrants::with_store(store.clone());
+        let lib = a.grant_directory(&t.0.join("lib")).unwrap();
+        // Another instance prunes `lib` after it was replaced.
+        std::fs::remove_dir_all(&lib).unwrap();
+        let _b = PathGrants::with_store(store.clone());
+        std::fs::create_dir_all(&lib).unwrap();
+        // `a` still remembers `lib`, but its next write must not re-add it.
+        let out = a.grant_directory(&t.0.join("outside")).unwrap();
+        assert_eq!(stored_roots(&store), vec![out]);
+        assert!(check_dir(&s(lib), &a).is_err());
+    }
+
+    #[test]
+    fn failed_temp_write_leaves_no_temp_file() {
+        let t = tmp("tmp-cleanup");
+        let store = t.0.join("granted_dirs.json");
+        // Make the rename fail after the temp file was written.
+        std::fs::create_dir_all(store.join("blocker")).unwrap();
+        assert!(write_atomic(&store, b"[]").is_err());
         let leftovers = std::fs::read_dir(&t.0)
             .unwrap()
             .filter(|e| {
