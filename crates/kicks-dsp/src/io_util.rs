@@ -62,6 +62,22 @@ pub fn choose_buffer_size(requested: u32, supported: Option<(u32, u32)>) -> Opti
     Some(requested.clamp(min, max))
 }
 
+/// Size the mono input ring from the backend's callback bound, not the
+/// requested period (which CPAL may round or ignore). Unknown/invalid bounds
+/// must be rejected during setup rather than silently dropping large callbacks.
+pub fn input_ring_capacity(output_period: u32, input_range: Option<(u32, u32)>) -> Option<usize> {
+    let (min, max) = input_range?;
+    if min == 0 || min > max {
+        return None;
+    }
+    let capacity = (max as usize)
+        .checked_mul(2)?
+        .checked_add(output_period as usize)?
+        .max((output_period as usize).checked_mul(8)?)
+        .max(4096);
+    (capacity <= usize::MAX / 2).then_some(capacity)
+}
+
 /// Pick a channel index that exists on the device; falls back to 0.
 pub fn clamp_channel(requested: u16, channels: u16) -> usize {
     if channels == 0 || requested >= channels {
@@ -116,6 +132,50 @@ mod tests {
         assert_eq!(choose_buffer_size(8192, Some((64, 4096))), Some(4096));
         assert_eq!(choose_buffer_size(256, None), None);
         assert_eq!(choose_buffer_size(256, Some((10, 5))), None);
+    }
+
+    #[test]
+    fn input_period_is_negotiated_independently() {
+        let requested = 256;
+        assert_eq!(choose_buffer_size(requested, Some((64, 512))), Some(256));
+        assert_eq!(
+            choose_buffer_size(requested, Some((1024, 8192))),
+            Some(1024)
+        );
+        assert_eq!(choose_buffer_size(requested, None), None);
+    }
+
+    #[test]
+    fn input_ring_holds_large_callback_with_output_default() {
+        use ringbuf::traits::{Consumer, Producer, Split};
+
+        // Output's unknown default must not limit an 8192-frame input callback
+        // to the old 4096-sample ring, even with the initial silence present.
+        let prefill = 256;
+        let capacity = input_ring_capacity(prefill, Some((64, 8192))).unwrap();
+        let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(capacity).split();
+        for _ in 0..prefill {
+            producer.try_push(0.0).unwrap();
+        }
+        let input = vec![1.0; 8192];
+        assert_eq!(
+            extract_channel(&input, 1, 0, |s| producer.try_push(s).is_ok()),
+            0
+        );
+        for _ in 0..prefill {
+            assert_eq!(consumer.try_pop(), Some(0.0));
+        }
+        for _ in 0..8192 {
+            assert_eq!(consumer.try_pop(), Some(1.0));
+        }
+        assert_eq!(consumer.try_pop(), None);
+    }
+
+    #[test]
+    fn input_ring_requires_valid_backend_bound() {
+        assert_eq!(input_ring_capacity(256, None), None);
+        assert_eq!(input_ring_capacity(256, Some((8192, 64))), None);
+        assert_eq!(input_ring_capacity(256, Some((0, 8192))), None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::sync::LockOrRecover;
 use kicks_core::persistence;
 use kicks_core::signal_chain::{ChainSlot, SignalChain};
+use kicks_dsp::param::ParamSendError;
 use kicks_dsp::plugins::WET_DRY_PARAM;
 use kicks_dsp::KicksEngine;
 use serde::Serialize;
@@ -64,9 +65,9 @@ fn running_engine(state: &AppState) -> Option<Arc<Mutex<KicksEngine>>> {
 /// Send parameter changes to the running engine.
 ///
 /// Uses the lock-free param queue when audio is running (the audio thread
-/// applies them at the next block). If there is no queue, or it is full,
-/// the change is applied under the engine lock instead. Previously these
-/// commands used nested `try_lock`s and silently dropped the change
+/// applies them at the next block). Full queues are retried in order on
+/// this control thread. Without a queue, changes use the engine lock.
+/// Previously these commands used nested `try_lock`s and silently dropped the change
 /// whenever the audio callback held the lock.
 pub(crate) fn push_to_engine(state: &AppState, msgs: &[(String, f32)]) {
     let mut pending: Vec<&(String, f32)> = Vec::new();
@@ -75,8 +76,18 @@ pub(crate) fn push_to_engine(state: &AppState, msgs: &[(String, f32)]) {
         match tx.as_ref() {
             Some(tx) => {
                 for m in msgs {
-                    if tx.send(&m.0, m.1).is_err() {
-                        pending.push(m);
+                    loop {
+                        match tx.send(&m.0, m.1) {
+                            Ok(()) => break,
+                            Err(ParamSendError::Full) => {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                            Err(ParamSendError::KeyTooLong) => {
+                                // This key cannot have an older queued update.
+                                pending.push(m);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -94,14 +105,28 @@ pub(crate) fn push_to_engine(state: &AppState, msgs: &[(String, f32)]) {
     }
 }
 
+/// Restore a complete chain before audio starts (no queue exists yet).
+pub(crate) fn initialize_engine_chain(eng: &mut KicksEngine, chain: &SignalChain) {
+    reorder_engine(eng, chain);
+    for slot in &chain.slots {
+        for (key, value) in slot_messages(slot) {
+            eng.apply_param(&key, value);
+        }
+    }
+}
+
+fn reorder_engine(eng: &mut KicksEngine, chain: &SignalChain) {
+    let order: Vec<&str> = chain.slots.iter().map(|s| s.id.as_str()).collect();
+    eng.reorder_plugins(&order);
+}
+
 /// Make the running engine match `chain`: plugin order, bypass, wet/dry and
-/// every parameter. Used after reorder, undo/redo and reset.
+/// every parameter. Used after chain edits and preset/scene recall.
 pub(crate) fn sync_engine_to_chain(state: &AppState, chain: &SignalChain) {
     let Some(eng) = running_engine(state) else {
         return;
     };
-    let order: Vec<&str> = chain.slots.iter().map(|s| s.id.as_str()).collect();
-    eng.lock_or_recover().reorder_plugins(&order);
+    reorder_engine(&mut eng.lock_or_recover(), chain);
     let msgs: Vec<(String, f32)> = chain.slots.iter().flat_map(slot_messages).collect();
     push_to_engine(state, &msgs);
 }
@@ -393,6 +418,78 @@ mod tests {
         let amp = chain.slots.iter().find(|s| s.id == "amp").unwrap();
         assert!(!amp.enabled);
         assert_eq!(amp.wet_dry, 0.4);
+    }
+
+    #[test]
+    fn full_queue_preserves_the_latest_update() {
+        let state = AppState::for_test();
+        let eng = running(&state);
+        let (tx, mut rx) = param_channel();
+        for _ in 0..kicks_dsp::param::PARAM_QUEUE_CAPACITY {
+            tx.send("amp/drive", 0.1).unwrap();
+        }
+        *state.param_tx.lock().unwrap() = Some(tx);
+
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let sender = scope.spawn(move || {
+                push_to_engine(&state, &[("amp/drive".to_string(), 0.9)]);
+                done_tx.send(()).unwrap();
+            });
+            // A full queue must backpressure the sender, rather than allowing
+            // a direct write that the older queued value could overwrite.
+            assert_eq!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            let input = [0.0; 64];
+            let mut output = [0.0; 64];
+            while !sender.is_finished() {
+                eng.lock()
+                    .unwrap()
+                    .process_block(&mut rx, &input, &mut output);
+                std::thread::yield_now();
+            }
+            sender.join().unwrap();
+            eng.lock()
+                .unwrap()
+                .process_block(&mut rx, &input, &mut output);
+        });
+        assert_eq!(param(&eng, "amp/drive"), Some(0.9));
+    }
+
+    #[test]
+    fn startup_and_recall_restore_complete_chain() {
+        let mut chain = SignalChain::default();
+        let delay = chain.slots.iter().position(|s| s.id == "delay").unwrap();
+        let boost = chain.slots.iter().position(|s| s.id == "boost").unwrap();
+        chain.slots.swap(delay, boost);
+        let amp = chain.slots.iter_mut().find(|s| s.id == "amp").unwrap();
+        amp.enabled = false;
+        amp.wet_dry = 0.25;
+        amp.parameters.insert("drive".to_string(), 0.7);
+
+        for startup in [true, false] {
+            let state = AppState::for_test();
+            let eng = running(&state);
+            if startup {
+                initialize_engine_chain(&mut eng.lock().unwrap(), &chain);
+            } else {
+                let (tx, mut rx) = param_channel();
+                *state.param_tx.lock().unwrap() = Some(tx);
+                sync_engine_to_chain(&state, &chain);
+                eng.lock()
+                    .unwrap()
+                    .process_block(&mut rx, &[0.0; 64], &mut [0.0; 64]);
+            }
+            assert_eq!(param(&eng, "amp/enabled"), Some(0.0));
+            assert_eq!(param(&eng, "amp/wet_dry"), Some(0.25));
+            assert_eq!(param(&eng, "amp/drive"), Some(0.7));
+            let names = eng.lock().unwrap().plugin_names();
+            assert!(
+                names.iter().position(|s| s == "delay") < names.iter().position(|s| s == "boost")
+            );
+        }
     }
 
     #[test]

@@ -156,14 +156,7 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
             let bass_val = slot.parameters.get("bass_mode").copied().unwrap_or(1.0);
             eng_inner.set_parameter("bass_mode", bass_val);
         }
-        // Apply the saved chain: order, bypass, wet/dry and every parameter.
-        let order: Vec<&str> = chain.slots.iter().map(|s| s.id.as_str()).collect();
-        eng_inner.reorder_plugins(&order);
-        for slot in &chain.slots {
-            for (key, value) in crate::commands::signal_chain::slot_messages(slot) {
-                eng_inner.apply_param(&key, value);
-            }
-        }
+        super::signal_chain::initialize_engine_chain(&mut eng_inner, &chain);
     }
     drop(chain);
 
