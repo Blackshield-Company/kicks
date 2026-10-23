@@ -221,8 +221,12 @@ impl DelayLine {
     fn read(&self, delay_samples: f32) -> f32 {
         let delay = delay_samples.clamp(0.0, (self.capacity - 1) as f32);
         let read_pos = (self.write_pos as f32 - delay).rem_euclid(self.capacity as f32);
-        let idx = read_pos as usize;
-        let frac = read_pos - idx as f32;
+        // f32 rounding in rem_euclid can yield exactly `capacity`; wrap it.
+        let mut idx = read_pos as usize;
+        if idx >= self.capacity {
+            idx = 0;
+        }
+        let frac = (read_pos - read_pos.floor()).clamp(0.0, 1.0);
         let next = (idx + 1) % self.capacity;
 
         self.buffer[idx] * (1.0 - frac) + self.buffer[next] * frac
@@ -609,6 +613,21 @@ impl Cab {
             ir_data.len() as f32 / ir_sample_rate * 1000.0,
             ir_sample_rate
         );
+    }
+
+    /// Build a trimmed, normalised convolver. Heavy; call off the audio thread.
+    pub fn prepare_ir(ir_data: &[f32], ir_sample_rate: f32) -> Convolver {
+        let mut conv = Convolver::new(ir_data, ir_sample_rate);
+        conv.trim(0.001);
+        conv.normalize();
+        conv
+    }
+
+    /// Install a convolver built by [`prepare_ir`](Self::prepare_ir).
+    /// Returns the previous one so the caller can drop it off the audio thread.
+    pub fn install_ir(&mut self, path: String, conv: Convolver) -> Option<Convolver> {
+        self.ir_path = Some(path);
+        self.convolver.replace(conv)
     }
 
     /// Clear the loaded IR, falling back to filter-only processing.
@@ -1323,61 +1342,89 @@ impl PluginRegistry {
     /// Uses pre-allocated double buffers to avoid heap allocation in the
     /// real-time audio callback.
     pub fn process_all(&mut self, input: &[f32], output: &mut [f32]) -> anyhow::Result<()> {
-        let n = input.len();
+        let n = input.len().min(output.len());
         if self.plugins.is_empty() {
-            output.copy_from_slice(input);
-            self.levels.clear();
+            output[..n].copy_from_slice(&input[..n]);
             return Ok(());
         }
-
-        self.levels.resize(self.plugins.len(), 0.0);
-
-        // Ensure working buffers are large enough (resize only grows, never shrinks in RT)
-        if self.buf_a.len() < n {
-            self.buf_a.resize(n, 0.0);
+        // Never grow buffers here: that would allocate on the audio thread.
+        // Blocks larger than the pre-allocated size are processed in chunks.
+        let chunk = self.buf_a.len().min(self.buf_b.len());
+        if chunk == 0 {
+            // `init_all` was never called; pass audio through untouched.
+            output[..n].copy_from_slice(&input[..n]);
+            return Ok(());
         }
-        if self.buf_b.len() < n {
-            self.buf_b.resize(n, 0.0);
+        let mut start = 0;
+        while start < n {
+            let end = (start + chunk).min(n);
+            self.process_chunk(&input[start..end], &mut output[start..end])?;
+            start = end;
         }
+        Ok(())
+    }
 
-        // Copy input into buf_a
+    fn process_chunk(&mut self, input: &[f32], output: &mut [f32]) -> anyhow::Result<()> {
+        let n = input.len();
         self.buf_a[..n].copy_from_slice(input);
 
-        // Alternate between buf_a and buf_b for each plugin to avoid allocation.
         // read_from_a = true means read from buf_a, write to buf_b.
         let mut read_from_a = true;
-
         for (i, plugin) in self.plugins.iter_mut().enumerate() {
-            if self.enabled.get(i).copied().unwrap_or(true) {
-                // Plugin is enabled — process normally
-                if read_from_a {
-                    plugin.process(&self.buf_a[..n], &mut self.buf_b[..n])?;
-                    self.levels[i] = compute_rms(&self.buf_b[..n]);
-                } else {
-                    plugin.process(&self.buf_b[..n], &mut self.buf_a[..n])?;
-                    self.levels[i] = compute_rms(&self.buf_a[..n]);
-                }
+            let (src, dst) = if read_from_a {
+                (&self.buf_a[..n], &mut self.buf_b[..n])
             } else {
-                // Plugin is bypassed — copy input to output unchanged
-                if read_from_a {
-                    self.buf_b[..n].copy_from_slice(&self.buf_a[..n]);
-                } else {
-                    self.buf_a[..n].copy_from_slice(&self.buf_b[..n]);
-                }
-                self.levels[i] = 0.0;
+                (&self.buf_b[..n], &mut self.buf_a[..n])
+            };
+            let level = if self.enabled.get(i).copied().unwrap_or(true) {
+                plugin.process(src, dst)?;
+                compute_rms(dst)
+            } else {
+                dst.copy_from_slice(src);
+                0.0
+            };
+            if let Some(l) = self.levels.get_mut(i) {
+                *l = level;
             }
             read_from_a = !read_from_a;
         }
-
-        // Copy final result to output
-        if read_from_a {
-            // After even number of plugins, result ended up in buf_a
-            output.copy_from_slice(&self.buf_a[..n]);
+        let result = if read_from_a {
+            &self.buf_a[..n]
         } else {
-            // After odd number of plugins, result ended up in buf_b
-            output.copy_from_slice(&self.buf_b[..n]);
-        }
+            &self.buf_b[..n]
+        };
+        output.copy_from_slice(result);
         Ok(())
+    }
+
+    /// Real-time-safe parameter update, used by the audio callback.
+    ///
+    /// Unlike [`set_parameter`](Self::set_parameter) it never touches the
+    /// `parameters` cache (which would allocate a `String` key) and never
+    /// formats strings. `"plugin/param"` ids target one plugin; `"plugin/enabled"`
+    /// toggles bypass; bare ids go to every plugin that exposes them.
+    pub fn set_parameter_rt(&mut self, id: &str, value: f32) {
+        if let Some((plugin_name, param_id)) = id.split_once('/') {
+            for (i, plugin) in self.plugins.iter_mut().enumerate() {
+                if plugin.name() != plugin_name {
+                    continue;
+                }
+                if param_id == "enabled" {
+                    if let Some(e) = self.enabled.get_mut(i) {
+                        *e = value > 0.5;
+                    }
+                } else if plugin.get_parameter(param_id).is_some() {
+                    plugin.set_parameter(param_id, value);
+                }
+                return;
+            }
+            return;
+        }
+        for plugin in &mut self.plugins {
+            if plugin.get_parameter(id).is_some() {
+                plugin.set_parameter(id, value);
+            }
+        }
     }
 
     /// Return the current per-plugin RMS audio levels.
@@ -1422,9 +1469,13 @@ impl PluginRegistry {
     }
 
     pub fn get_parameter(&self, id: &str) -> Option<f32> {
-        // Check local override first
-        if let Some(&val) = self.parameters.get(id) {
-            return Some(val);
+        // Plugin state is authoritative: queued updates bypass the cache.
+        if let Some((plugin_name, param_id)) = id.split_once('/').or_else(|| id.split_once('.')) {
+            let i = self.plugins.iter().position(|p| p.name() == plugin_name)?;
+            if param_id == "enabled" || param_id == "__enabled" {
+                return self.enabled.get(i).map(|&e| if e { 1.0 } else { 0.0 });
+            }
+            return self.plugins[i].get_parameter(param_id);
         }
         // Fall through to plugins
         for plugin in &self.plugins {
@@ -1432,7 +1483,7 @@ impl PluginRegistry {
                 return Some(val);
             }
         }
-        None
+        self.parameters.get(id).copied()
     }
 
     pub fn set_parameter(&mut self, id: &str, value: f32) {
@@ -1458,10 +1509,9 @@ impl PluginRegistry {
 
     /// Update only the parameter value HashMap without iterating plugins.
     ///
-    /// Used by the main thread to keep `get_parameter` consistent while
-    /// the actual plugin update goes through the lock-free SPSC queue.
-    /// The audio callback drains the queue and calls `set_parameter`
-    /// (which includes the plugin iteration) before each process cycle.
+    /// Used by the main thread while the actual plugin update goes through
+    /// the lock-free SPSC queue. Readback of known parameters reflects plugin
+    /// state once the audio callback applies the update with `set_parameter_rt`.
     pub fn set_parameter_value(&mut self, id: &str, value: f32) {
         self.parameters.insert(id.to_string(), value);
     }
@@ -1639,6 +1689,19 @@ impl PluginRegistry {
         false
     }
 
+    /// Swap a prepared convolver into the Cab. `Err(conv)` if there is no Cab.
+    /// On success returns the old convolver (drop it outside the engine lock).
+    pub fn install_cab_ir(
+        &mut self, path: String, conv: Convolver,
+    ) -> Result<Option<Convolver>, Convolver> {
+        for plugin in &mut self.plugins {
+            if let Some(cab) = plugin.as_any_mut().downcast_mut::<Cab>() {
+                return Ok(cab.install_ir(path, conv));
+            }
+        }
+        Err(conv)
+    }
+
     /// Get IR info from the Cab plugin, if loaded.
     pub fn cab_ir_info(&self) -> Option<IrInfo> {
         for plugin in &self.plugins {
@@ -1699,6 +1762,60 @@ impl PluginRegistry {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn delay_line_read_never_indexes_past_end() {
+        // f32 rem_euclid of a tiny negative offset rounds to exactly
+        // `capacity`; this used to panic on the audio thread.
+        let mut d = DelayLine::new(96_000);
+        d.write(1.0);
+        d.write_pos = 0;
+        for delay in [1e-5f32, 1e-3, 0.5, 95_999.0] {
+            assert!(d.read(delay).is_finite());
+        }
+    }
+
+    #[test]
+    fn process_all_handles_blocks_larger_than_buffers() {
+        let mut r = PluginRegistry::new();
+        r.build_default_chain();
+        r.init_all(48_000.0).unwrap();
+        let input = vec![0.1f32; 10_000];
+        let mut output = vec![0.0f32; 10_000];
+        r.process_all(&input, &mut output).unwrap();
+        assert!(output.iter().all(|s| s.is_finite()));
+        assert!(output[9_999] != 0.0 || output.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn parameter_readback_uses_plugin_state_after_rt_updates() {
+        let mut r = PluginRegistry::new();
+        r.build_default_chain();
+        r.set_parameter("gain", 0.25);
+        r.set_parameter_rt("gain", 0.75);
+        assert_eq!(r.get_parameter("gain"), Some(0.75));
+        r.set_parameter("amp/drive", 0.25);
+        r.set_parameter_value("amp/drive", 0.5);
+        r.set_parameter_rt("amp/drive", 0.75);
+        assert_eq!(r.get_parameter("amp/drive"), Some(0.75));
+        assert_eq!(r.get_parameter("amp.drive"), Some(0.75));
+        r.set_parameter("boost/enabled", 1.0);
+        r.set_parameter_rt("boost/enabled", 0.0);
+        assert_eq!(r.get_parameter("boost/enabled"), Some(0.0));
+        assert_eq!(r.get_parameter("boost.__enabled"), Some(0.0));
+    }
+
+    #[test]
+    fn set_parameter_rt_routes_composite_ids() {
+        let mut r = PluginRegistry::new();
+        r.build_default_chain();
+        r.init_all(48_000.0).unwrap();
+        r.set_parameter_rt("boost/enabled", 0.0);
+        assert_eq!(r.get_parameter("boost/enabled"), Some(0.0));
+        r.set_parameter_rt("amp/drive", 0.25);
+        assert_eq!(r.get_parameter("amp/drive"), Some(0.25));
+    }
+
     use super::*;
 
     fn test_buffer(size: usize) -> Vec<f32> {

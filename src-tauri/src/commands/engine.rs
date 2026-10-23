@@ -185,8 +185,12 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
             }
             if let Some(ref mut io) = *jack_io {
                 let cpu_load = Arc::clone(&state.cpu_load);
-                io.start(eng_for_io, Some(cpu_load))
-                    .map_err(|e| format!("Failed to start JACK audio: {}", e))?;
+                {
+                    let (param_tx, param_rx) = param_channel();
+                    *state.param_tx.lock().map_err(|e| e.to_string())? = Some(param_tx);
+                    io.start(eng_for_io, param_rx, Some(cpu_load))
+                }
+                .map_err(|e| format!("Failed to start JACK audio: {}", e))?;
             }
             tracing::info!("Audio engine started with JACK I/O");
         }

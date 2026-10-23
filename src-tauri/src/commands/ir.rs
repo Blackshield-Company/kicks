@@ -225,8 +225,17 @@ pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoad
     {
         let engine_guard = state.engine.lock().map_err(|e| e.to_string())?;
         if let Some(ref eng_arc) = *engine_guard {
-            let mut engine = eng_arc.lock().map_err(|e| e.to_string())?;
-            engine.load_ir_to_cab(path.clone(), mono_samples, sample_rate);
+            // Prepare the convolver off-lock; swap under the lock; drop the
+            // old one after unlocking so the audio thread never waits on it.
+            let conv = kicks_dsp::Cab::prepare_ir(&mono_samples, sample_rate);
+            let old = {
+                let mut engine = eng_arc.lock().map_err(|e| e.to_string())?;
+                engine.install_cab_ir(path.clone(), conv)
+            };
+            if old.is_err() {
+                return Err("No Cab slot in the current chain".to_string());
+            }
+            drop(old);
         } else {
             return Err("Engine not running".to_string());
         }
