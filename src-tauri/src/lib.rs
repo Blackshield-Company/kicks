@@ -113,6 +113,7 @@ pub fn run() {
             commands::engine::get_parameter,
             commands::engine::get_audio_levels,
             commands::engine::get_cpu_load,
+            commands::engine::get_audio_status,
             // Signal Chain
             commands::signal_chain::get_signal_chain,
             commands::signal_chain::build_default_chain,

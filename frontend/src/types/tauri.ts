@@ -53,6 +53,12 @@ export interface SettingsPayload {
   sample_rate: number;
   buffer_size: number;
   audio_device: string;
+  /** "Cpal" or "Jack" */
+  audio_backend: string;
+  input_device: string;
+  output_device: string;
+  /** 0-based input channel that carries the guitar */
+  input_channel: number;
   ir_directories: string[];
   nam_directories: string[];
   preset_directories: string[];
@@ -60,6 +66,18 @@ export interface SettingsPayload {
   ai_endpoint_url: string;
   ai_api_key: string;
   ai_model: string;
+}
+
+/** Live audio I/O health reported by the backend */
+export interface AudioStatus {
+  running: boolean;
+  backend: string;
+  latency_ms: number;
+  underruns: number;
+  overruns: number;
+  callback_frames: number;
+  input_ok: boolean;
+  input_error: string | null;
 }
 
 /** An audio device discovered via CPAL */

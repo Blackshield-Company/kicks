@@ -10,6 +10,7 @@ pub mod convolution;
 pub mod engine;
 #[cfg(feature = "fft-convolution")]
 pub mod fft_convolution;
+pub mod io_util;
 pub mod looper;
 pub mod metronome;
 pub mod nam;

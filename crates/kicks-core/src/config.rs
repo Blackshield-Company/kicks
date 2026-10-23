@@ -38,6 +38,9 @@ pub struct KicksConfig {
     /// Separate input/output device selection (replaces single audio_device).
     pub input_device: String,
     pub output_device: String,
+    /// Input channel carrying the guitar (0-based).
+    #[serde(default)]
+    pub input_channel: u16,
 
     /// Audio backend selection.
     pub audio_backend: AudioBackend,
@@ -68,6 +71,7 @@ impl Default for KicksConfig {
             audio_device: String::new(),
             input_device: String::new(),
             output_device: String::new(),
+            input_channel: 0,
             audio_backend: AudioBackend::default(),
             ir_directories: vec![
                 std::env::var("HOME").unwrap_or_default() + "/.config/guitarix/impulses",
@@ -98,4 +102,17 @@ pub enum AudioBackend {
     #[default]
     Cpal,
     Jack,
+}
+
+#[cfg(test)]
+mod input_channel_tests {
+    use super::*;
+
+    #[test]
+    fn old_config_without_input_channel_still_loads() {
+        let mut v = serde_json::to_value(KicksConfig::default()).unwrap();
+        v.as_object_mut().unwrap().remove("input_channel");
+        let cfg: KicksConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(cfg.input_channel, 0);
+    }
 }

@@ -32,6 +32,9 @@ pub struct AudioConfig {
     pub output_device: Option<String>,
     /// Optional input device name. If None, uses default.
     pub input_device: Option<String>,
+    /// Which input channel carries the guitar (0-based). Out-of-range
+    /// values fall back to channel 0.
+    pub input_channel: u16,
 }
 
 impl Default for AudioConfig {
@@ -41,6 +44,7 @@ impl Default for AudioConfig {
             buffer_size: 256,
             output_device: None,
             input_device: None,
+            input_channel: 0,
         }
     }
 }
@@ -71,6 +75,8 @@ pub struct CpalAudioIO {
     _output_stream: Option<cpal::Stream>,
     config: AudioConfig,
     active: bool,
+    stats: Arc<crate::io_util::AudioStats>,
+    latency_ms: f64,
 }
 
 impl CpalAudioIO {
@@ -103,6 +109,12 @@ impl CpalAudioIO {
             use ringbuf::traits::{Consumer, Producer, Split};
             use ringbuf::HeapRb;
 
+            use crate::io_util::{
+                choose_buffer_size, clamp_channel, estimated_latency_ms, extract_channel,
+                input_ring_capacity, write_mono_to_interleaved, AudioStats,
+            };
+            use std::sync::atomic::Ordering;
+
             let host = cpal::default_host();
 
             let output_device = config
@@ -129,89 +141,191 @@ impl CpalAudioIO {
                 .or_else(|| host.default_input_device());
 
             let sr = config.sample_rate as u32;
-            let bs = config.buffer_size;
+            let requested_bs = config.buffer_size.max(16);
 
-            let stream_config = cpal::StreamConfig {
-                channels: 2,
+            // ── Negotiate with the device instead of assuming stereo/fixed ──
+            let out_default = output_device
+                .default_output_config()
+                .context("Output device has no default config")?;
+            let out_channels = out_default.channels().max(1);
+            let out_range = match out_default.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, max } => Some((*min, *max)),
+                cpal::SupportedBufferSize::Unknown => None,
+            };
+            let chosen_bs = choose_buffer_size(requested_bs, out_range);
+            let cpal_bs = match chosen_bs {
+                Some(n) => cpal::BufferSize::Fixed(n),
+                None => cpal::BufferSize::Default,
+            };
+            let bs = chosen_bs.unwrap_or(requested_bs);
+            let out_config = cpal::StreamConfig {
+                channels: out_channels,
                 sample_rate: sr,
-                buffer_size: cpal::BufferSize::Fixed(bs),
+                buffer_size: cpal_bs,
             };
 
-            let err_fn = |err| tracing::error!("CPAL stream error: {}", err);
-
-            // Ring buffer: input callback → output callback (mono)
-            let ring_capacity = bs as usize * 8;
-            let ring = HeapRb::<f32>::new(ring_capacity);
-            let (producer, mut consumer) = ring.split();
-
-            // ── Input stream (optional — only if device exists) ──
-            let input_stream = input_device.and_then(|dev| {
-                let mut prod = producer;
-                dev.build_input_stream::<f32, _, _>(
-                    &stream_config,
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        // CPAL gives us interleaved stereo; convert to mono by taking left channel
-                        for frame in data.chunks(2) {
-                            let mono = frame.first().copied().unwrap_or(0.0);
-                            let _ = prod.try_push(mono);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .ok()
+            // Input devices may have a different period range than output devices.
+            let in_default = input_device
+                .as_ref()
+                .map(|dev| dev.default_input_config())
+                .transpose()
+                .context("Input device has no default config")?;
+            let in_range = in_default.as_ref().and_then(|c| match c.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, max } => Some((*min, *max)),
+                cpal::SupportedBufferSize::Unknown => None,
             });
+            let in_bs = choose_buffer_size(requested_bs, in_range);
 
-            if let Some(ref stream) = input_stream {
-                if let Err(e) = stream.play() {
-                    tracing::warn!("Failed to start input stream: {}", e);
-                }
+            let stats = Arc::new(AudioStats::default());
+            self.stats = stats.clone();
+
+            // Ring buffer: input callback → output callback (mono). Pre-fill
+            // one period of silence so the first output callbacks don't
+            // underrun while the input stream spins up.
+            let prefill = bs as usize;
+            // Fixed periods are only requests in CPAL. Reserve for the reported
+            // input maximum, including when output uses an unknown default period.
+            // Without an input bound we cannot safely size a finite ring.
+            let capacity = if input_device.is_some() {
+                input_ring_capacity(bs, in_range)
+                    .context("Input device has no valid callback buffer bound")?
+            } else {
+                (bs as usize * 8).max(4096)
+            };
+            let ring =
+                HeapRb::<f32>::try_new(capacity).context("Failed to allocate input audio ring")?;
+            let (mut producer, mut consumer) = ring.split();
+            for _ in 0..prefill {
+                let _ = producer.try_push(0.0);
             }
 
+            // ── Input stream (optional — only if device exists) ──
+            let input_stream = match input_device {
+                None => {
+                    stats.set_input_error("No input device found");
+                    None
+                }
+                Some(dev) => {
+                    let in_channels = in_default
+                        .as_ref()
+                        .map(|c| c.channels())
+                        .unwrap_or(1)
+                        .max(1);
+                    let channel = clamp_channel(config.input_channel, in_channels);
+                    let in_config = cpal::StreamConfig {
+                        channels: in_channels,
+                        sample_rate: sr,
+                        buffer_size: in_bs
+                            .map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed),
+                    };
+                    let mut prod = producer;
+                    let in_stats = stats.clone();
+                    let err_stats = stats.clone();
+                    let built = dev.build_input_stream::<f32, _, _>(
+                        &in_config,
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            let dropped =
+                                extract_channel(data, in_channels as usize, channel, |s| {
+                                    prod.try_push(s).is_ok()
+                                });
+                            if dropped > 0 {
+                                in_stats.overruns.fetch_add(1, Ordering::Relaxed);
+                            }
+                        },
+                        move |err| {
+                            tracing::error!("CPAL input stream error: {}", err);
+                            err_stats.set_input_error(err.to_string());
+                        },
+                        None,
+                    );
+                    match built {
+                        Ok(stream) => match stream.play() {
+                            Ok(()) => {
+                                stats.input_ok.store(true, Ordering::Relaxed);
+                                Some(stream)
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to start input stream: {}", e);
+                                stats.set_input_error(format!("Input stream did not start: {e}"));
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("Failed to build input stream: {}", e);
+                            stats.set_input_error(format!("Input stream unavailable: {e}"));
+                            None
+                        }
+                    }
+                }
+            };
+
             // ── Output stream ──
-            // Pre-allocated input buffer avoids allocation in audio callback
-            let mut input_buf = vec![0.0f32; bs as usize];
-            let mut output_buf = vec![0.0f32; bs as usize];
+            // Pre-allocated mono work buffers; callbacks of any size are
+            // processed in chunks of this length (no allocation).
+            const MAX_CHUNK: usize = 4096;
+            let mut input_buf = vec![0.0f32; MAX_CHUNK];
+            let mut output_buf = vec![0.0f32; MAX_CHUNK];
             let eng = engine;
             let mut param_rx = param_rx;
+            let out_ch = out_channels as usize;
+            let out_stats = stats.clone();
 
             let output_stream = output_device
                 .build_output_stream::<f32, _, _>(
-                    &stream_config,
+                    &out_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        // Drain ring buffer into mono input_buf
-                        for input_slot in input_buf.iter_mut() {
-                            *input_slot = consumer.try_pop().unwrap_or(0.0);
-                        }
-
                         let start = std::time::Instant::now();
+                        let frames = data.len() / out_ch;
+                        out_stats
+                            .last_callback_frames
+                            .store(frames as u64, Ordering::Relaxed);
 
-                        // The main thread only holds the engine lock for O(1)
-                        // swaps (chains/IRs are built off-lock), so try_lock
-                        // almost always succeeds. If it fails, the previous
-                        // block is repeated at reduced level rather than a hard
-                        // dropout to silence.
-                        if let Ok(mut eng) = eng.try_lock() {
-                            eng.process_block(&mut param_rx, &input_buf, &mut output_buf);
-                        } else {
-                            for s in output_buf.iter_mut() {
-                                *s *= 0.5;
+                        let mut starved = false;
+                        let mut done = 0;
+                        while done < frames {
+                            let n = (frames - done).min(MAX_CHUNK);
+                            for slot in input_buf[..n].iter_mut() {
+                                *slot = match consumer.try_pop() {
+                                    Some(s) => s,
+                                    None => {
+                                        starved = true;
+                                        0.0
+                                    }
+                                };
                             }
+                            // The main thread only holds the engine lock for
+                            // O(1) swaps, so try_lock almost always succeeds.
+                            // On a miss, fade the previous chunk instead of a
+                            // hard cut to silence.
+                            if let Ok(mut eng) = eng.try_lock() {
+                                eng.process_block(
+                                    &mut param_rx,
+                                    &input_buf[..n],
+                                    &mut output_buf[..n],
+                                );
+                            } else {
+                                for s in output_buf[..n].iter_mut() {
+                                    *s *= 0.5;
+                                }
+                            }
+                            write_mono_to_interleaved(
+                                &output_buf[..n],
+                                &mut data[done * out_ch..(done + n) * out_ch],
+                                out_ch,
+                            );
+                            done += n;
+                        }
+                        // Any trailing partial frame (shouldn't happen) is silenced.
+                        data[frames * out_ch..].fill(0.0);
+                        if starved {
+                            out_stats.underruns.fetch_add(1, Ordering::Relaxed);
                         }
 
                         let elapsed = start.elapsed().as_secs_f64();
-                        let budget = bs as f64 / sr as f64;
+                        let budget = frames.max(1) as f64 / sr as f64;
                         let pct = ((elapsed / budget) * 1000.0).min(100_000.0) as u64;
                         if let Some(ref atomic) = cpu_load {
-                            atomic.store(pct, std::sync::atomic::Ordering::Relaxed);
-                        }
-
-                        // Duplicate mono output to stereo interleaved
-                        for (frame, &mono) in data.chunks_mut(2).zip(output_buf.iter()) {
-                            frame[0] = mono;
-                            if let Some(right) = frame.get_mut(1) {
-                                *right = mono;
-                            }
+                            atomic.store(pct, Ordering::Relaxed);
                         }
                     },
                     |err| tracing::error!("CPAL output stream error: {}", err),
@@ -226,11 +340,15 @@ impl CpalAudioIO {
             self._input_stream = input_stream;
             self._output_stream = Some(output_stream);
             self.active = true;
+            self.latency_ms = estimated_latency_ms(bs, prefill as u32, sr as f64);
 
             tracing::info!(
-                "CPAL audio started: {} Hz, buffer {} frames, stereo",
+                "CPAL audio started: {} Hz, buffer {} frames ({:?}), {} out ch, ~{:.1} ms",
                 sr,
-                bs
+                bs,
+                cpal_bs,
+                out_channels,
+                self.latency_ms
             );
         }
 
@@ -260,6 +378,16 @@ impl CpalAudioIO {
 
     pub fn config(&self) -> &AudioConfig {
         &self.config
+    }
+
+    /// Underrun/overrun counters and input-stream health.
+    pub fn stats(&self) -> crate::io_util::AudioStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    /// Estimated round-trip latency of the running stream, in ms.
+    pub fn latency_ms(&self) -> f64 {
+        self.latency_ms
     }
 }
 
@@ -477,6 +605,7 @@ pub struct JackAudioIO {
 
     config: JackConfig,
     active: bool,
+    latency_ms: f64,
 }
 
 impl JackAudioIO {
@@ -494,6 +623,7 @@ impl JackAudioIO {
             _output_r: None,
             config,
             active: false,
+            latency_ms: 0.0,
         }
     }
 
@@ -565,6 +695,7 @@ impl JackAudioIO {
             // Ports are owned by the JackProcessHandler inside AsyncClient now.
             // We don't store them separately.
             self.active = true;
+            self.latency_ms = crate::io_util::estimated_latency_ms(buffer_size, 0, sample_rate);
 
             tracing::info!(
                 "JACK client '{}' active: {} Hz, {} frames, ports: in_l, in_r, out_l, out_r",
@@ -597,6 +728,11 @@ impl JackAudioIO {
             self._output_r = None;
         }
         self.active = false;
+    }
+
+    /// Estimated round-trip latency (two JACK periods), in ms.
+    pub fn latency_ms(&self) -> f64 {
+        self.latency_ms
     }
 
     pub fn is_active(&self) -> bool {

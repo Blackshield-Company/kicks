@@ -75,6 +75,17 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
       } as T;
     case 'list_presets':
       return [] as T;
+    case 'get_audio_status':
+      return {
+        running: false,
+        backend: '',
+        latency_ms: 0,
+        underruns: 0,
+        overruns: 0,
+        callback_frames: 0,
+        input_ok: false,
+        input_error: null,
+      } as T;
     case 'get_settings':
       return {
         guitarix_host: '127.0.0.1',
@@ -84,6 +95,10 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
         sample_rate: 48000,
         buffer_size: 256,
         audio_device: '',
+        audio_backend: 'Cpal',
+        input_device: '',
+        output_device: '',
+        input_channel: 0,
         ir_directories: [],
         nam_directories: [],
         preset_directories: [],
@@ -405,6 +420,10 @@ export async function clearNamModel(): Promise<void> {
 
 export async function getAudioLevels(): Promise<number[]> {
   return invoke<number[]>('get_audio_levels');
+}
+
+export async function getAudioStatus() {
+  return invoke<import('../types/tauri').AudioStatus>('get_audio_status');
 }
 
 export async function getCpuLoad(): Promise<number> {

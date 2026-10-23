@@ -2,7 +2,7 @@ import { useEffect, useCallback, useState } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useHotkeys } from '../hooks/useHotkeys';
 import * as api from '../lib/tauri';
-import type { AudioDeviceInfo } from '../types/tauri';
+import type { AudioDeviceInfo, AudioStatus } from '../types/tauri';
 import { THEMES, applyTheme, getSavedThemeId, saveThemeId, getThemeById } from '../theme/theme';
 
 export function Settings() {
@@ -11,6 +11,21 @@ export function Settings() {
   const [activeTheme, setActiveTheme] = useState(getSavedThemeId());
   const [devices, setDevices] = useState<AudioDeviceInfo[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(true);
+  const [audioStatus, setAudioStatus] = useState<AudioStatus | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = () =>
+      api.getAudioStatus()
+        .then((s) => alive && setAudioStatus(s))
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 1000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     fetchSettings();
@@ -140,6 +155,83 @@ export function Settings() {
               )}
             </div>
           </label>
+        </div>
+      </section>
+
+      {/* Audio routing */}
+      <section className="border border-[var(--border)] rounded-xl p-4 bg-[var(--bg-surface)]">
+        <h3 className="text-sm font-medium text-[var(--text)] mb-3">Audio Routing</h3>
+        <div className="flex flex-col gap-3">
+          <label className="flex items-center justify-between">
+            <span className="text-sm text-[var(--text)]">Backend</span>
+            <select
+              aria-label="Audio backend"
+              value={settings.audio_backend || 'Cpal'}
+              onChange={(e) => updateSetting('audio_backend', e.target.value)}
+              className="w-48 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
+            >
+              <option value="Cpal">System (ALSA / PipeWire / CoreAudio / WASAPI)</option>
+              <option value="Jack">JACK / PipeWire-JACK</option>
+            </select>
+          </label>
+          <label className="flex items-center justify-between">
+            <span className="text-sm text-[var(--text)]">Input Device</span>
+            <select
+              aria-label="Input device"
+              value={settings.input_device ?? ''}
+              onChange={(e) => updateSetting('input_device', e.target.value)}
+              className="w-48 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
+            >
+              <option value="">System Default</option>
+              {devices.filter((d) => d.is_input).map((d) => (
+                <option key={d.name} value={d.name}>{d.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center justify-between">
+            <span className="text-sm text-[var(--text)]">Input Channel</span>
+            <select
+              aria-label="Input channel"
+              value={settings.input_channel ?? 0}
+              onChange={(e) => updateSetting('input_channel', parseInt(e.target.value) || 0)}
+              className="w-48 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
+            >
+              {[0, 1, 2, 3, 4, 5, 6, 7].map((c) => (
+                <option key={c} value={c}>Input {c + 1}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center justify-between">
+            <span className="text-sm text-[var(--text)]">Output Device</span>
+            <select
+              aria-label="Output device"
+              value={settings.output_device ?? ''}
+              onChange={(e) => updateSetting('output_device', e.target.value)}
+              className="w-48 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] text-sm outline-none focus:border-[var(--accent)]"
+            >
+              <option value="">System Default</option>
+              {devices.filter((d) => d.is_output).map((d) => (
+                <option key={d.name} value={d.name}>{d.name}</option>
+              ))}
+            </select>
+          </label>
+          <div data-testid="audio-status" className="text-xs text-[var(--text-muted)] flex flex-wrap gap-x-4 gap-y-1">
+            {audioStatus?.running ? (
+              <>
+                <span>{audioStatus.backend}</span>
+                <span>~{audioStatus.latency_ms.toFixed(1)} ms</span>
+                <span>{audioStatus.callback_frames || '—'} frames/callback</span>
+                <span>xruns: {audioStatus.underruns + audioStatus.overruns}</span>
+                {!audioStatus.input_ok && (
+                  <span className="text-red-400">
+                    No input: {audioStatus.input_error ?? 'unknown error'}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span>Audio stopped</span>
+            )}
+          </div>
         </div>
       </section>
 
