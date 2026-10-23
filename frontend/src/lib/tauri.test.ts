@@ -12,6 +12,7 @@ import {
   listScenes,
   listAmpPresets,
   getAudioStatus,
+  toCommandArgs,
 } from './tauri';
 
 describe('tauri API simulation (outside Tauri)', () => {
@@ -82,5 +83,17 @@ describe('tauri API simulation (outside Tauri)', () => {
     const st = await getAudioStatus();
     expect(st.running).toBe(false);
     expect(st.underruns).toBe(0);
+  });
+
+  it('toCommandArgs camelCases top-level keys only', () => {
+    expect(toCommandArgs({ slot_id: 'amp', wet_dry: 0.5, enabled: true })).toEqual({
+      slotId: 'amp',
+      wetDry: 0.5,
+      enabled: true,
+    });
+    const settings = { input_channel: 1 };
+    expect(toCommandArgs({ settings })).toEqual({ settings: { input_channel: 1 } });
+    expect(toCommandArgs({ from_idx: 1, to_idx: 3 })).toEqual({ fromIdx: 1, toIdx: 3 });
+    expect(toCommandArgs()).toEqual({});
   });
 });

@@ -5,7 +5,7 @@ use kicks_core::signal_chain::SignalChain;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use super::signal_chain::push_undo_state;
+use super::signal_chain::{push_undo_state, sync_engine_to_chain};
 use crate::AppState;
 
 /// A scene descriptor returned to the frontend.
@@ -127,17 +127,7 @@ pub fn load_scene(state: State<'_, AppState>, index: usize) -> Result<(), String
             .map_err(|e| format!("Failed to persist signal chain: {}", e))?;
     }
 
-    // Push scene parameters through the lock-free channel
-    // (no engine mutex needed — the audio callback drains the queue)
-    if let Ok(tx_guard) = state.param_tx.lock() {
-        if let Some(ref tx) = *tx_guard {
-            for slot in &scene.signal_chain.slots {
-                for (param_id, value) in &slot.parameters {
-                    let _ = tx.send(format!("{}/{}", slot.id, param_id), *value);
-                }
-            }
-        }
-    }
+    sync_engine_to_chain(&state, &scene.signal_chain);
     tracing::info!("Applied scene '{}' to engine", scene.name);
 
     tracing::info!("Scene '{}' (index {}) loaded", scene.name, index);
@@ -214,9 +204,11 @@ pub fn next_scene(state: State<'_, AppState>) -> Result<Option<SceneInfo>, Strin
         };
         if let Some(scene) = scene {
             let mut chain = state.signal_chain.lock().map_err(|e| e.to_string())?;
-            *chain = scene.signal_chain;
+            *chain = scene.signal_chain.clone();
             persistence::save_signal_chain(&chain)
                 .map_err(|e| format!("Failed to persist signal chain: {}", e))?;
+            drop(chain);
+            sync_engine_to_chain(&state, &scene.signal_chain);
         }
     }
 
@@ -248,9 +240,11 @@ pub fn prev_scene(state: State<'_, AppState>) -> Result<Option<SceneInfo>, Strin
         };
         if let Some(scene) = scene {
             let mut chain = state.signal_chain.lock().map_err(|e| e.to_string())?;
-            *chain = scene.signal_chain;
+            *chain = scene.signal_chain.clone();
             persistence::save_signal_chain(&chain)
                 .map_err(|e| format!("Failed to persist signal chain: {}", e))?;
+            drop(chain);
+            sync_engine_to_chain(&state, &scene.signal_chain);
         }
     }
 

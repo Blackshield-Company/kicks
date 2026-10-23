@@ -3,7 +3,7 @@ use kicks_core::preset::{Bank, Preset};
 use serde::Serialize;
 use tauri::State;
 
-use super::signal_chain::push_undo_state;
+use super::signal_chain::{push_undo_state, sync_engine_to_chain};
 use crate::AppState;
 
 /// A lightweight preset descriptor for list views.
@@ -112,21 +112,7 @@ pub fn load_preset(
             .map_err(|e| format!("Failed to persist signal chain: {}", e))?;
     }
 
-    // Push preset parameters through the lock-free channel
-    // (no engine mutex needed — the audio callback drains the queue)
-    if let Ok(tx_guard) = state.param_tx.lock() {
-        if let Some(ref tx) = *tx_guard {
-            for slot in &preset_chain.slots {
-                let _ = tx.send(
-                    format!("{}/enabled", slot.id),
-                    if slot.enabled { 1.0 } else { 0.0 },
-                );
-                for (param_id, value) in &slot.parameters {
-                    let _ = tx.send(format!("{}/{}", slot.id, param_id), *value);
-                }
-            }
-        }
-    }
+    sync_engine_to_chain(&state, &preset_chain);
 
     tracing::info!("Preset '{}' loaded from bank '{}'", preset_name, bank_name);
     Ok(())

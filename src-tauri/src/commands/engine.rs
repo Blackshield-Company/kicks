@@ -156,14 +156,7 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
             let bass_val = slot.parameters.get("bass_mode").copied().unwrap_or(1.0);
             eng_inner.set_parameter("bass_mode", bass_val);
         }
-        // Apply all saved signal chain parameters to the engine
-        for slot in &chain.slots {
-            let plugin_name = slot.id.clone();
-            eng_inner.set_plugin_enabled(&plugin_name, slot.enabled);
-            for (param_id, value) in &slot.parameters {
-                eng_inner.set_parameter_on_plugin(&plugin_name, param_id, *value);
-            }
-        }
+        super::signal_chain::initialize_engine_chain(&mut eng_inner, &chain);
     }
     drop(chain);
 

@@ -17,6 +17,20 @@ function resolveInvoke(): ((cmd: string, args?: Record<string, unknown>) => Prom
 /**
  * Safely invoke a Tauri command, falling back gracefully when running in a browser.
  */
+/**
+ * Tauri 2 matches command arguments by their camelCase name (`slot_id` in
+ * Rust is `slotId` over IPC). This file writes snake_case keys, which the
+ * real backend rejected with "missing required key". Convert top-level keys
+ * only: nested values are serde structs that keep their own field names.
+ */
+export function toCommandArgs(args: Record<string, unknown> = {}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase())] = v;
+  }
+  return out;
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const tauriInvoke = resolveInvoke();
 
@@ -25,7 +39,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
     return simulate<T>(cmd, args);
   }
 
-  return tauriInvoke(cmd, args ?? {}) as Promise<T>;
+  return tauriInvoke(cmd, toCommandArgs(args)) as Promise<T>;
 }
 
 // ── Simulated responses for dev mode (outside Tauri) ──
@@ -68,8 +82,8 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
           { id: 'amp', plugin_type: 'Amp', enabled: true, wet_dry: 1.0, parameters: { gain: 0.5, master: 0.7, bass: 0.5, mid: 0.5, treble: 0.5, drive: 0.5 } },
           { id: 'cab', plugin_type: 'Cab', enabled: true, wet_dry: 1.0, parameters: { level: 1.0, low_cut: 0.0, high_cut: 0.6 } },
           { id: 'bass-amp', plugin_type: 'BassAmp', enabled: false, wet_dry: 1.0, parameters: { gain: 0.25, master: 0.78, bass: 0.65, mid: 0.55, treble: 0.40, drive: 0.12 } },
-          { id: 'delay', plugin_type: 'Delay', enabled: false, wet_dry: 0.3, parameters: { time: 0.3, feedback: 0.4, mix: 0.3 } },
-          { id: 'reverb', plugin_type: 'Reverb', enabled: true, wet_dry: 0.3, parameters: { size: 0.5, damping: 0.5, mix: 0.3 } },
+          { id: 'delay', plugin_type: 'Delay', enabled: false, wet_dry: 1.0, parameters: { time: 0.3, feedback: 0.4, mix: 0.3 } },
+          { id: 'reverb', plugin_type: 'Reverb', enabled: true, wet_dry: 1.0, parameters: { size: 0.5, damping: 0.5, mix: 0.3 } },
           { id: 'output', plugin_type: 'Output', enabled: true, wet_dry: 1.0, parameters: { volume: 0.8 } },
         ],
       } as T;
@@ -151,8 +165,8 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
             { id: 'boost', plugin_type: 'Boost', enabled: true, wet_dry: 1.0, parameters: { gain: 0.75 } },
             { id: 'amp', plugin_type: 'Amp', enabled: true, wet_dry: 1.0, parameters: { gain: 0.5, master: 0.7, bass: 0.5, mid: 0.5, treble: 0.5, drive: 0.5 } },
             { id: 'cab', plugin_type: 'Cab', enabled: true, wet_dry: 1.0, parameters: { level: 1.0, low_cut: 0.0, high_cut: 0.6 } },
-            { id: 'delay', plugin_type: 'Delay', enabled: false, wet_dry: 0.3, parameters: { time: 0.3, feedback: 0.4, mix: 0.3 } },
-            { id: 'reverb', plugin_type: 'Reverb', enabled: true, wet_dry: 0.3, parameters: { size: 0.5, damping: 0.5, mix: 0.3 } },
+            { id: 'delay', plugin_type: 'Delay', enabled: false, wet_dry: 1.0, parameters: { time: 0.3, feedback: 0.4, mix: 0.3 } },
+            { id: 'reverb', plugin_type: 'Reverb', enabled: true, wet_dry: 1.0, parameters: { size: 0.5, damping: 0.5, mix: 0.3 } },
             { id: 'output', plugin_type: 'Output', enabled: true, wet_dry: 1.0, parameters: { volume: 0.8 } },
           ],
         },
