@@ -3,7 +3,7 @@
 //! The webview can call any registered command with any string, so file
 //! commands must not trust the path they are given. A path is accepted only
 //! if, after resolving symlinks and `..`, it is
-//! - inside one of the configured library directories (IR / NAM dirs), or
+//! - inside a directory picked in a native dialog this session, or
 //! - a file the user picked in a native dialog this session (or a directory
 //!   containing such a file, for scans),
 //!
@@ -20,10 +20,11 @@ pub const MAX_IR_BYTES: u64 = 64 * 1024 * 1024;
 /// Largest NAM model we will read.
 pub const MAX_NAM_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Files the user picked through a native dialog this session.
+/// Files and directories the user picked through native dialogs this session.
 #[derive(Default)]
 pub struct PathGrants {
     picked: Mutex<HashSet<PathBuf>>,
+    roots: Mutex<HashSet<PathBuf>>,
 }
 
 impl PathGrants {
@@ -32,6 +33,23 @@ impl PathGrants {
         if let Ok(p) = path.canonicalize() {
             self.picked.lock_or_recover().insert(p);
         }
+    }
+
+    /// Record a native directory-picker result, never a settings value.
+    pub fn grant_directory(&self, path: &Path) -> Result<PathBuf, String> {
+        let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+        if !canonical.is_dir() {
+            return Err("Not a directory".to_string());
+        }
+        self.roots.lock_or_recover().insert(canonical.clone());
+        Ok(canonical)
+    }
+
+    fn under_root(&self, path: &Path) -> bool {
+        self.roots
+            .lock_or_recover()
+            .iter()
+            .any(|root| path.starts_with(root))
     }
 
     fn has_file(&self, canonical: &Path) -> bool {
@@ -46,23 +64,9 @@ impl PathGrants {
     }
 }
 
-fn canonical_roots(roots: &[String]) -> Vec<PathBuf> {
-    roots
-        .iter()
-        .filter(|r| !r.trim().is_empty())
-        .filter_map(|r| Path::new(r).canonicalize().ok())
-        .collect()
-}
-
-fn under_roots(path: &Path, roots: &[String]) -> bool {
-    canonical_roots(roots)
-        .iter()
-        .any(|root| path.starts_with(root))
-}
-
 /// Validate a file path for reading. Returns the resolved path to open.
 pub fn check_file(
-    path: &str, roots: &[String], grants: &PathGrants, exts: &[&str], max_bytes: u64,
+    path: &str, grants: &PathGrants, exts: &[&str], max_bytes: u64,
 ) -> Result<PathBuf, String> {
     let canonical = Path::new(path)
         .canonicalize()
@@ -88,29 +92,29 @@ pub fn check_file(
             meta.len()
         ));
     }
-    if grants.has_file(&canonical) || under_roots(&canonical, roots) {
+    if grants.has_file(&canonical) || grants.under_root(&canonical) {
         Ok(canonical)
     } else {
         Err(format!(
-            "Access denied: {path} is outside the configured library folders. \
-             Pick it with the file dialog or add its folder in Settings."
+            "Access denied: {path} is outside the approved library folders. \
+             Pick it with the file dialog or pick its folder with the native directory dialog."
         ))
     }
 }
 
 /// Validate a directory path for listing. Returns the resolved directory.
-pub fn check_dir(dir: &str, roots: &[String], grants: &PathGrants) -> Result<PathBuf, String> {
+pub fn check_dir(dir: &str, grants: &PathGrants) -> Result<PathBuf, String> {
     let canonical = Path::new(dir)
         .canonicalize()
         .map_err(|_| format!("Directory '{dir}' does not exist"))?;
     if !canonical.is_dir() {
         return Err(format!("Not a directory: {dir}"));
     }
-    if under_roots(&canonical, roots) || grants.has_file_in(&canonical) {
+    if grants.under_root(&canonical) || grants.has_file_in(&canonical) {
         Ok(canonical)
     } else {
         Err(format!(
-            "Access denied: {dir} is outside the configured library folders"
+            "Access denied: {dir} is outside the approved library folders"
         ))
     }
 }
@@ -145,77 +149,100 @@ mod tests {
     #[test]
     fn file_inside_library_is_allowed() {
         let t = tmp("in");
-        let roots = vec![s(t.0.join("lib"))];
         let g = PathGrants::default();
-        assert!(check_file(&s(t.0.join("lib/a.wav")), &roots, &g, &["wav"], 10).is_ok());
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_file(&s(t.0.join("lib/a.wav")), &g, &["wav"], 10).is_ok());
     }
 
     #[test]
     fn file_outside_library_is_denied_until_picked() {
         let t = tmp("out");
-        let roots = vec![s(t.0.join("lib"))];
         let g = PathGrants::default();
+        g.grant_directory(&t.0.join("lib")).unwrap();
         let p = s(t.0.join("outside/b.wav"));
-        assert!(check_file(&p, &roots, &g, &["wav"], 10)
+        assert!(check_file(&p, &g, &["wav"], 10)
             .unwrap_err()
             .contains("Access denied"));
         g.grant(&t.0.join("outside/b.wav"));
-        assert!(check_file(&p, &roots, &g, &["wav"], 10).is_ok());
+        assert!(check_file(&p, &g, &["wav"], 10).is_ok());
         // Granting one file does not grant its siblings.
         let sib = s(t.0.join("outside/secret.wav"));
-        assert!(check_file(&sib, &roots, &g, &["wav"], 10).is_err());
+        assert!(check_file(&sib, &g, &["wav"], 10).is_err());
     }
 
     #[test]
     fn dot_dot_escape_is_denied() {
         let t = tmp("dotdot");
-        let roots = vec![s(t.0.join("lib"))];
         let p = s(t.0.join("lib/../outside/b.wav"));
-        assert!(check_file(&p, &roots, &PathGrants::default(), &["wav"], 10).is_err());
+        let g = PathGrants::default();
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_file(&p, &g, &["wav"], 10).is_err());
     }
 
     #[cfg(unix)]
     #[test]
     fn symlink_out_of_library_is_denied() {
         let t = tmp("link");
-        let roots = vec![s(t.0.join("lib"))];
         std::os::unix::fs::symlink(t.0.join("outside/b.wav"), t.0.join("lib/link.wav")).unwrap();
         let p = s(t.0.join("lib/link.wav"));
-        assert!(check_file(&p, &roots, &PathGrants::default(), &["wav"], 10).is_err());
+        let g = PathGrants::default();
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_file(&p, &g, &["wav"], 10).is_err());
     }
 
     #[test]
     fn wrong_extension_and_oversize_are_rejected() {
         let t = tmp("ext");
-        let roots = vec![s(t.0.join("lib"))];
         let g = PathGrants::default();
+        g.grant_directory(&t.0.join("lib")).unwrap();
         let txt = s(t.0.join("lib/notes.txt"));
-        assert!(check_file(&txt, &roots, &g, &["wav"], 10)
+        assert!(check_file(&txt, &g, &["wav"], 10)
             .unwrap_err()
             .contains("Unsupported"));
         let wav = s(t.0.join("lib/a.wav"));
-        assert!(check_file(&wav, &roots, &g, &["wav"], 0)
+        assert!(check_file(&wav, &g, &["wav"], 0)
             .unwrap_err()
             .contains("too large"));
     }
 
     #[test]
-    fn empty_root_does_not_allow_everything() {
-        let t = tmp("empty");
-        let roots = vec![String::new()];
+    fn writable_settings_do_not_grant_access() {
+        let t = tmp("settings");
+        let mut config = kicks_core::config::KicksConfig::default();
+        let g = PathGrants::default();
+        config.ir_directories = vec!["/".into(), s(t.0.clone())];
+        config.nam_directories = config.ir_directories.clone();
         let p = s(t.0.join("lib/a.wav"));
-        assert!(check_file(&p, &roots, &PathGrants::default(), &["wav"], 10).is_err());
+        assert!(check_file(&p, &g, &["wav"], 10).is_err());
+        assert!(check_dir(&s(t.0.join("lib")), &g).is_err());
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_file(&p, &g, &["wav"], 10).is_ok());
+        // A new session never derives grants from the persisted settings.
+        assert!(check_file(&p, &PathGrants::default(), &["wav"], 10).is_err());
+    }
+
+    #[test]
+    fn directory_grants_reject_files_and_cover_descendants() {
+        let t = tmp("nested");
+        let g = PathGrants::default();
+        assert!(g.grant_directory(&t.0.join("outside/b.wav")).is_err());
+        assert!(check_file(&s(t.0.join("outside/b.wav")), &g, &["wav"], 10).is_err());
+        std::fs::create_dir(t.0.join("lib/nested")).unwrap();
+        std::fs::write(t.0.join("lib/nested/a.nam"), b"x").unwrap();
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_dir(&s(t.0.join("lib/nested")), &g).is_ok());
+        assert!(check_file(&s(t.0.join("lib/nested/a.nam")), &g, &["nam"], 10).is_ok());
     }
 
     #[test]
     fn dir_scan_scope() {
         let t = tmp("dir");
-        let roots = vec![s(t.0.join("lib"))];
         let g = PathGrants::default();
-        assert!(check_dir(&s(t.0.join("lib")), &roots, &g).is_ok());
-        assert!(check_dir(&s(t.0.join("outside")), &roots, &g).is_err());
-        assert!(check_dir("/etc", &roots, &g).is_err());
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_dir(&s(t.0.join("lib")), &g).is_ok());
+        assert!(check_dir(&s(t.0.join("outside")), &g).is_err());
+        assert!(check_dir("/etc", &g).is_err());
         g.grant(&t.0.join("outside/b.wav"));
-        assert!(check_dir(&s(t.0.join("outside")), &roots, &g).is_ok());
+        assert!(check_dir(&s(t.0.join("outside")), &g).is_ok());
     }
 }

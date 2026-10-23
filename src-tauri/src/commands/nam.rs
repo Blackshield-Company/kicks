@@ -28,7 +28,9 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
     let mut results = Vec::new();
 
     for dir in &config.nam_directories {
-        let path = std::path::PathBuf::from(dir);
+        let Ok(path) = crate::path_guard::check_dir(dir, &state.path_grants) else {
+            continue;
+        };
         if !path.exists() {
             continue;
         }
@@ -37,7 +39,14 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let fpath = entry.path();
+            let Ok(fpath) = crate::path_guard::check_file(
+                &entry.path().to_string_lossy(),
+                &state.path_grants,
+                &["nam"],
+                crate::path_guard::MAX_NAM_BYTES,
+            ) else {
+                continue;
+            };
             let ext = fpath
                 .extension()
                 .and_then(|e| e.to_str())
@@ -68,15 +77,21 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
 pub fn scan_nam_directory(
     state: State<'_, AppState>, dir_path: String,
 ) -> Result<Vec<NamFileInfo>, String> {
-    let roots = state.config.lock_or_recover().nam_directories.clone();
-    let path = crate::path_guard::check_dir(&dir_path, &roots, &state.path_grants)?;
+    let path = crate::path_guard::check_dir(&dir_path, &state.path_grants)?;
     let mut results = Vec::new();
 
     let entries =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in entries.flatten() {
-        let fpath = entry.path();
+        let Ok(fpath) = crate::path_guard::check_file(
+            &entry.path().to_string_lossy(),
+            &state.path_grants,
+            &["nam"],
+            crate::path_guard::MAX_NAM_BYTES,
+        ) else {
+            continue;
+        };
         let ext = fpath
             .extension()
             .and_then(|e| e.to_str())
@@ -106,10 +121,8 @@ pub fn scan_nam_directory(
 pub fn load_nam_model(
     state: State<'_, AppState>, path: String,
 ) -> Result<NamModelLoadResult, String> {
-    let roots = state.config.lock_or_recover().nam_directories.clone();
     let resolved = crate::path_guard::check_file(
         &path,
-        &roots,
         &state.path_grants,
         &["nam"],
         crate::path_guard::MAX_NAM_BYTES,

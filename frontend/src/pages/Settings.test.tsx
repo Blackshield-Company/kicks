@@ -46,3 +46,19 @@ describe('Settings audio routing', () => {
     expect(status).toHaveTextContent('No input: No input device found');
   });
 });
+
+describe('Settings library approval', () => {
+  it('updates a library only after a native picker result and preserves it on cancel', async () => {
+    await useSettingsStore.getState().fetchSettings();
+    const picker = vi.spyOn(api, 'pickLibraryDirectory').mockResolvedValue('/approved/ir');
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Choose IR Folder' }));
+    await waitFor(() => expect(useSettingsStore.getState().settings!.ir_directories).toEqual(['/approved/ir']));
+    picker.mockResolvedValue(null);
+    const before = useSettingsStore.getState().settings!.nam_directories;
+    fireEvent.click(screen.getByRole('button', { name: 'Choose NAM Folder' }));
+    await waitFor(() => expect(picker).toHaveBeenCalledTimes(2));
+    expect(useSettingsStore.getState().settings!.nam_directories).toEqual(before);
+    picker.mockRestore();
+  });
+});

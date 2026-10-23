@@ -104,6 +104,8 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
         input_ok: false,
         input_error: null,
       } as T;
+    case 'pick_library_directory':
+      return null as T;
     case 'get_settings':
       return {
         engine_mode: 'Auto',
@@ -572,4 +574,9 @@ export async function nextScene() {
 
 export async function prevScene() {
   return invoke<import('../types/tauri').SceneInfo | null>('prev_scene');
+}
+
+/** Grant a library root only after native user selection. */
+export function pickLibraryDirectory() {
+  return invoke<string | null>('pick_library_directory');
 }

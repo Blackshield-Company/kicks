@@ -1,5 +1,4 @@
 use crate::sync::LockOrRecover;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tauri::{State, Wry};
@@ -25,7 +24,9 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
     let mut results = Vec::new();
 
     for dir in &config.ir_directories {
-        let path = PathBuf::from(dir);
+        let Ok(path) = crate::path_guard::check_dir(dir, &state.path_grants) else {
+            continue;
+        };
         if !path.exists() {
             continue;
         }
@@ -34,7 +35,14 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let fpath = entry.path();
+            let Ok(fpath) = crate::path_guard::check_file(
+                &entry.path().to_string_lossy(),
+                &state.path_grants,
+                &["wav", "irs", "nam"],
+                crate::path_guard::MAX_IR_BYTES,
+            ) else {
+                continue;
+            };
             let ext = fpath
                 .extension()
                 .and_then(|e| e.to_str())
@@ -157,10 +165,8 @@ fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
 /// Load an impulse response file into the Cab plugin.
 #[tauri::command]
 pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoadResult, String> {
-    let roots = state.config.lock_or_recover().ir_directories.clone();
     let fpath = crate::path_guard::check_file(
         &path,
-        &roots,
         &state.path_grants,
         &["wav"],
         crate::path_guard::MAX_IR_BYTES,
@@ -323,15 +329,21 @@ pub fn clear_cab_ir(state: State<'_, AppState>) -> Result<(), String> {
 pub fn scan_ir_directory(
     state: State<'_, AppState>, dir_path: String,
 ) -> Result<Vec<IrFileInfo>, String> {
-    let roots = state.config.lock_or_recover().ir_directories.clone();
-    let path = crate::path_guard::check_dir(&dir_path, &roots, &state.path_grants)?;
+    let path = crate::path_guard::check_dir(&dir_path, &state.path_grants)?;
     let mut results = Vec::new();
 
     let entries =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in entries.flatten() {
-        let fpath = entry.path();
+        let Ok(fpath) = crate::path_guard::check_file(
+            &entry.path().to_string_lossy(),
+            &state.path_grants,
+            &["wav", "irs", "nam"],
+            crate::path_guard::MAX_IR_BYTES,
+        ) else {
+            continue;
+        };
         let ext = fpath
             .extension()
             .and_then(|e| e.to_str())

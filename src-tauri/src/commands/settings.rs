@@ -68,6 +68,29 @@ impl From<&KicksConfig> for SettingsPayload {
     }
 }
 
+/// Approve a library directory for this session through a native picker.
+/// Settings paths alone never authorize filesystem access.
+#[tauri::command]
+pub async fn pick_library_directory(
+    app: tauri::AppHandle, state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("Select Library Directory")
+        .blocking_pick_folder();
+    match folder {
+        Some(folder) => {
+            let path = folder.into_path().map_err(|e| e.to_string())?;
+            let canonical = state.path_grants.grant_directory(&path)?;
+            Ok(Some(canonical.to_string_lossy().into_owned()))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Get the current application settings.
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> SettingsPayload {

@@ -45,7 +45,7 @@ pub struct AppState {
     pub cpu_load: Arc<AtomicU64>,
     /// Active WAV recording (DI + processed), if any.
     pub recording: Mutex<Option<kicks_dsp::recorder::Recording>>,
-    /// Files the user picked in a native dialog (allowed outside library dirs).
+    /// Session-only native picker grants, independent of writable settings.
     pub path_grants: path_guard::PathGrants,
 }
 
@@ -169,6 +169,7 @@ pub fn run() {
             commands::presets::rename_preset,
             // IR Browser & Loading
             commands::ir::list_ir_files,
+            commands::settings::pick_library_directory,
             commands::ir::pick_ir_file,
             commands::ir::scan_ir_directory,
             commands::ir::load_ir_to_cab,
