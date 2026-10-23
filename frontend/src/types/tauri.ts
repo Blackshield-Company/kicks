@@ -80,6 +80,23 @@ export interface AudioStatus {
   input_error: string | null;
 }
 
+/** Live WAV recording state (DI on channel 1, processed on channel 2). */
+export interface RecordingStatus {
+  recording: boolean;
+  error: string | null;
+  path: string | null;
+  seconds: number;
+  dropped_frames: number;
+}
+
+/** Result of a finished recording. */
+export interface RecordingSummary {
+  path: string;
+  frames: number;
+  dropped_frames: number;
+  seconds: number;
+}
+
 /** An audio device discovered via CPAL */
 export interface AudioDeviceInfo {
   name: string;

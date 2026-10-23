@@ -89,6 +89,10 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
       } as T;
     case 'list_presets':
       return [] as T;
+    case 'recording_status':
+      return { recording: false, error: null, path: null, seconds: 0, dropped_frames: 0 } as T;
+    case 'start_recording':
+      throw new Error('Recording needs the desktop app');
     case 'get_audio_status':
       return {
         running: false,
@@ -434,6 +438,18 @@ export async function clearNamModel(): Promise<void> {
 
 export async function getAudioLevels(): Promise<number[]> {
   return invoke<number[]>('get_audio_levels');
+}
+
+export async function startRecording() {
+  return invoke<string>('start_recording');
+}
+
+export async function stopRecording() {
+  return invoke<import('../types/tauri').RecordingSummary>('stop_recording');
+}
+
+export async function getRecordingStatus() {
+  return invoke<import('../types/tauri').RecordingStatus>('recording_status');
 }
 
 export async function getAudioStatus() {

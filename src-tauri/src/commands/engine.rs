@@ -8,6 +8,7 @@ use kicks_dsp::{AudioConfig, AudioEngine, CpalAudioIO, JackAudioIO, KicksEngine}
 use serde::Serialize;
 use tauri::State;
 
+use crate::sync::LockOrRecover;
 use crate::AppState;
 
 /// Status information about the audio engine.
@@ -241,6 +242,18 @@ pub fn start_engine(state: State<'_, AppState>) -> Result<(), String> {
 /// Stop the audio engine and all I/O backends.
 #[tauri::command]
 pub fn stop_engine(state: State<'_, AppState>) -> Result<(), String> {
+    stop_engine_impl(&state)
+}
+
+pub(crate) fn stop_engine_impl(state: &AppState) -> Result<(), String> {
+    // Serialize recording start/stop with shutdown until the engine is cleared.
+    let mut recording = state.recording.lock_or_recover();
+    let recording_result = if recording.is_some() {
+        super::recording::stop_recording_locked(state, &mut recording).map(|_| ())
+    } else {
+        Ok(())
+    };
+
     // Clear the parameter channel first (no more pushes from main thread)
     *state.param_tx.lock().map_err(|e| e.to_string())? = None;
 
@@ -265,7 +278,7 @@ pub fn stop_engine(state: State<'_, AppState>) -> Result<(), String> {
     *engine_guard = None;
 
     tracing::info!("Audio engine stopped");
-    Ok(())
+    recording_result
 }
 
 /// Get the current engine status.

@@ -551,6 +551,35 @@ mod tests {
     }
 
     #[test]
+    fn default_chain_matches_engine_default_chain() {
+        let chain = SignalChain::default();
+        let ids: Vec<String> = chain.slots.iter().map(|s| s.id.clone()).collect();
+        let eng = KicksEngine::new();
+        assert_eq!(eng.plugin_names(), ids);
+        for slot in &chain.slots {
+            let on = eng.get_parameter(&format!("{}/enabled", slot.id));
+            // Delay is enabled in the engine but bypassed by the saved chain;
+            // sync_engine_to_chain resolves that at start.
+            if slot.id != "delay" {
+                assert_eq!(
+                    on,
+                    Some(if slot.enabled { 1.0 } else { 0.0 }),
+                    "{}",
+                    slot.id
+                );
+            }
+            for k in slot.parameters.keys() {
+                assert!(
+                    eng.get_parameter(&format!("{}/{}", slot.id, k)).is_some(),
+                    "engine has no {}/{}",
+                    slot.id,
+                    k
+                );
+            }
+        }
+    }
+
+    #[test]
     fn slot_messages_cover_bypass_mix_and_params() {
         let chain = SignalChain::default();
         let amp = chain.slots.iter().find(|s| s.id == "amp").unwrap();

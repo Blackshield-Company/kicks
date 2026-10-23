@@ -71,6 +71,12 @@ fn assert_chain_rt_safe(name: &str, build: impl FnOnce(&mut KicksEngine)) {
     let mut output = vec![0.0f32; BS];
     let mut phase = 0.0f32;
 
+    // Record DI + processed while measuring: the tap must be RT-safe too.
+    let rec_path =
+        std::env::temp_dir().join(format!("kicks-noalloc-{name}-{}.wav", std::process::id()));
+    let (tap, recording) = kicks_dsp::recorder::Recording::start(&rec_path, 48_000).unwrap();
+    eng.set_record_tap(Some(tap));
+
     // Warm-up block outside the measured region (first-touch lazies).
     test_signal(&mut input, &mut phase);
     eng.process_block(&mut rx, &input, &mut output);
@@ -86,6 +92,23 @@ fn assert_chain_rt_safe(name: &str, build: impl FnOnce(&mut KicksEngine)) {
         ("bpm", 0.6),
         ("running", 1.0),
         ("amp/wet_dry", 0.5),
+        // Phase 4 pedals: switch them all on and move a knob on each.
+        ("gate/enabled", 1.0),
+        ("comp/enabled", 1.0),
+        ("drive/enabled", 1.0),
+        ("eq/enabled", 1.0),
+        ("chorus/enabled", 1.0),
+        ("phaser/enabled", 1.0),
+        ("flanger/enabled", 1.0),
+        ("tremolo/enabled", 1.0),
+        ("gate/threshold", 0.2),
+        ("comp/ratio", 0.8),
+        ("drive/drive", 0.7),
+        ("eq/mid", 0.9),
+        ("chorus/depth", 0.9),
+        ("phaser/rate", 0.6),
+        ("flanger/feedback", 0.8),
+        ("tremolo/rate", 0.5),
     ] {
         tx.send(id, v).unwrap();
     }
@@ -102,6 +125,10 @@ fn assert_chain_rt_safe(name: &str, build: impl FnOnce(&mut KicksEngine)) {
     });
     assert_eq!(n, 0, "{name}: audio path made {n} heap operations");
     assert!(output.iter().all(|s| s.is_finite()));
+    drop(eng.set_record_tap(None));
+    let summary = recording.stop().unwrap();
+    assert!(summary.frames > 0, "{name}: nothing was recorded");
+    std::fs::remove_file(&rec_path).ok();
 }
 
 #[test]
@@ -134,4 +161,35 @@ fn counter_detects_allocation() {
         std::hint::black_box(v);
     });
     assert!(n >= 1);
+}
+
+/// Realtime-factor check for the full default chain with every pedal on.
+/// Run with: cargo test --release -p kicks-dsp --test no_alloc -- --ignored --nocapture
+#[test]
+#[ignore]
+fn bench_default_chain_all_pedals() {
+    let mut eng = KicksEngine::new();
+    eng.init(48_000.0, BS as u32).unwrap();
+    let (tx, mut rx) = param_channel();
+    for id in [
+        "gate", "comp", "drive", "eq", "chorus", "phaser", "flanger", "tremolo", "delay",
+    ] {
+        tx.send(format!("{id}/enabled"), 1.0).unwrap();
+    }
+    let mut input = vec![0.0f32; BS];
+    let mut output = vec![0.0f32; BS];
+    let mut phase = 0.0f32;
+    let blocks = 48_000 * 10 / BS; // 10 s of audio
+    let t = std::time::Instant::now();
+    for _ in 0..blocks {
+        test_signal(&mut input, &mut phase);
+        eng.process_block(&mut rx, &input, &mut output);
+    }
+    let el = t.elapsed().as_secs_f64();
+    println!(
+        "10 s of audio in {:.3} s → {:.1}x realtime, {:.1}% of one core",
+        el,
+        10.0 / el,
+        el * 10.0
+    );
 }

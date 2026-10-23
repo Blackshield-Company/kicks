@@ -8,6 +8,7 @@ pub mod metronome;
 pub mod midi;
 pub mod nam;
 pub mod presets;
+pub mod recording;
 pub mod scenes;
 pub mod settings;
 pub mod signal_chain;
