@@ -83,8 +83,41 @@ fn update_store(store: &Path, new_root: Option<&Path>) -> Result<HashSet<PathBuf
     // `lock` is released when dropped here.
 }
 
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        a.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
 fn is_valid_root(path: &Path) -> bool {
-    matches!(path.canonicalize(), Ok(c) if c.as_os_str() == path.as_os_str() && c.is_dir())
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    #[cfg(not(windows))]
+    let broad = ["/usr", "/etc", "/var", "/tmp", "/home", "/Users"];
+    #[cfg(windows)]
+    let broad = [r"C:\", r"C:\Users", r"C:\Windows"];
+    if path.parent().is_none()
+        || dirs::home_dir()
+            .and_then(|home| home.canonicalize().ok())
+            .is_some_and(|home| home.ancestors().any(|p| paths_equal(p, &canonical)))
+        || broad
+            .iter()
+            .filter_map(|p| Path::new(p).canonicalize().ok())
+            // Reject a denylisted folder and anything containing one
+            // (e.g. macOS `/private`, which holds `/private/tmp`).
+            .any(|p| p.ancestors().any(|a| paths_equal(a, &canonical)))
+    {
+        return false;
+    }
+    paths_equal(&canonical, path) && canonical.is_dir()
 }
 
 fn open_private(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
@@ -108,7 +141,6 @@ fn open_private(path: &Path, create_new: bool) -> std::io::Result<std::fs::File>
 /// The temp file is removed on every failure path.
 fn write_atomic(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     struct Cleanup<'a>(&'a Path, bool);
     impl Drop for Cleanup<'_> {
         fn drop(&mut self) {
@@ -118,7 +150,9 @@ fn write_atomic(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
     }
     loop {
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let n = u128::from_ne_bytes(random);
         let tmp = store.with_extension(format!("{}.{}.tmp", std::process::id(), n));
         let mut f = match open_private(&tmp, true) {
             Ok(f) => f,
@@ -131,6 +165,9 @@ fn write_atomic(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
         drop(f);
         std::fs::rename(&tmp, store)?;
         guard.1 = false;
+        // Directory fsync is Unix-only; Windows does not support this directory open/sync pattern.
+        #[cfg(unix)]
+        std::fs::File::open(store.parent().unwrap_or(Path::new(".")))?.sync_all()?;
         return Ok(());
     }
 }
@@ -163,8 +200,8 @@ impl PathGrants {
     /// Record a native directory-picker result, never a settings value.
     pub fn grant_directory(&self, path: &Path) -> Result<PathBuf, String> {
         let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-        if !canonical.is_dir() {
-            return Err("Not a directory".to_string());
+        if !is_valid_root(&canonical) {
+            return Err("Directory is too broad or is not a valid library directory".to_string());
         }
         let mut roots = self.roots.lock_or_recover();
         match &self.store {
@@ -198,17 +235,13 @@ impl PathGrants {
     }
 }
 
-/// Validate a file path for reading. Returns the resolved path to open.
+/// Open once and validate that handle against the canonical, approved path.
 pub fn check_file(
     path: &str, grants: &PathGrants, exts: &[&str], max_bytes: u64,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, std::fs::File), String> {
     let canonical = Path::new(path)
         .canonicalize()
         .map_err(|_| format!("File not found: {path}"))?;
-    let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err(format!("Not a file: {path}"));
-    }
     let ext = canonical
         .extension()
         .and_then(|e| e.to_str())
@@ -220,20 +253,94 @@ pub fn check_file(
             exts.join(", ")
         ));
     }
+    if !(grants.has_file(&canonical) || grants.under_root(&canonical)) {
+        return Err(format!(
+            "Access denied: {path} is outside the approved library folders. \
+             Pick it with the file dialog or pick its folder with the native directory dialog."
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Avoid following a replaced leaf or blocking on a planted FIFO.
+        // Regular files ignore O_NONBLOCK.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&canonical).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("Not a file: {path}"));
+    }
     if meta.len() > max_bytes {
         return Err(format!(
             "File too large ({} bytes, limit {max_bytes}): {path}",
             meta.len()
         ));
     }
-    if grants.has_file(&canonical) || grants.under_root(&canonical) {
-        Ok(canonical)
-    } else {
-        Err(format!(
-            "Access denied: {path} is outside the approved library folders. \
-             Pick it with the file dialog or pick its folder with the native directory dialog."
-        ))
+    validate_handle(&file, &canonical)?;
+    // Recheck scope using the path proven to belong to the open handle.
+    if !(grants.has_file(&canonical) || grants.under_root(&canonical)) {
+        return Err("Access denied: file is outside the approved library folders".into());
     }
+    Ok((canonical, file))
+}
+
+/// Reject replacement of the canonical path between resolution and opening.
+fn validate_handle(file: &std::fs::File, canonical: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let actual = {
+        use std::os::fd::AsRawFd;
+        std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .map_err(|e| e.to_string())?
+    };
+    #[cfg(target_os = "macos")]
+    let actual = {
+        use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+        let mut buf = [0u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes into the supplied buffer.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let end = buf
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or("Invalid handle path")?;
+        PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..end]))
+    };
+    #[cfg(windows)]
+    let actual = {
+        use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+        let mut buf = vec![0u16; 32768];
+        // SAFETY: the handle is live and the buffer has the declared capacity.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(file.as_raw_handle(), buf.as_mut_ptr(), buf.len() as u32, 0)
+        };
+        if len == 0 || len as usize >= buf.len() {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize]))
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    if !paths_equal(&actual, canonical) {
+        return Err("File changed while opening".into());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        // Other platforms lack handle-path verification here; retain the identity check.
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        let current = std::fs::metadata(canonical).map_err(|e| e.to_string())?;
+        if meta.dev() != current.dev()
+            || meta.ino() != current.ino()
+            || canonical.canonicalize().map_err(|e| e.to_string())? != canonical
+        {
+            return Err("File changed while opening".into());
+        }
+    }
+    Ok(())
 }
 
 /// Validate a directory path for listing. Returns the resolved directory.
@@ -379,36 +486,92 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_instances_never_lose_grants() {
-        let t = tmp("overlap");
-        let store = t.0.join("granted_dirs.json");
-        let dirs: Vec<PathBuf> = (0..8)
-            .map(|i| {
-                let d = t.0.join(format!("d{i}"));
-                std::fs::create_dir_all(&d).unwrap();
-                d.canonicalize().unwrap()
-            })
-            .collect();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(dirs.len()));
-        let handles: Vec<_> = dirs
-            .iter()
-            .cloned()
-            .map(|d| {
-                let (store, barrier) = (store.clone(), barrier.clone());
-                std::thread::spawn(move || {
-                    // Separate instances, as two app processes would have.
-                    let g = PathGrants::with_store(store);
-                    barrier.wait();
-                    g.grant_directory(&d).unwrap();
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
+    #[ignore = "invoked by process stress test"]
+    fn grant_process_child() {
+        let Some(base) = std::env::var_os("KICKS_GRANT_CHILD") else {
+            return;
+        };
+        let base = PathBuf::from(base);
+        let index = std::env::var("KICKS_GRANT_INDEX").unwrap();
+        while !base.join("start").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        let mut want = dirs.clone();
+        for round in 0..6 {
+            let g = PathGrants::with_store(base.join("granted_dirs.json"));
+            g.grant_directory(&base.join(format!("d{index}-{round}")))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn overlapping_instances_never_lose_grants() {
+        let t = tmp("process-stress");
+        let mut want = Vec::new();
+        for i in 0..8 {
+            for round in 0..6 {
+                let dir = t.0.join(format!("d{i}-{round}"));
+                std::fs::create_dir(&dir).unwrap();
+                want.push(dir.canonicalize().unwrap());
+            }
+        }
+        let mut children: Vec<_> = (0..8)
+            .map(|i| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "path_guard::tests::grant_process_child",
+                        "--ignored",
+                    ])
+                    .env("KICKS_GRANT_CHILD", &t.0)
+                    .env("KICKS_GRANT_INDEX", i.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        std::fs::write(t.0.join("start"), b"go").unwrap();
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
         want.sort();
-        assert_eq!(stored_roots(&store), want);
+        assert_eq!(stored_roots(&t.0.join("granted_dirs.json")), want);
+    }
+
+    #[test]
+    fn broad_roots_are_rejected_on_load_and_grant() {
+        let t = tmp("broad");
+        let store = t.0.join("granted_dirs.json");
+        let mut broad = vec![PathBuf::from("/")];
+        if let Some(home) = dirs::home_dir().and_then(|h| h.canonicalize().ok()) {
+            broad.extend(home.ancestors().map(Path::to_path_buf));
+        }
+        broad.extend(["/usr", "/etc", "/var", "/tmp"].map(PathBuf::from));
+        std::fs::write(&store, serde_json::to_vec(&broad).unwrap()).unwrap();
+        let g = PathGrants::with_store(store.clone());
+        for path in broad {
+            assert!(g.grant_directory(&path).is_err());
+            assert!(PathGrants::default().grant_directory(&path).is_err());
+        }
+        assert!(stored_roots(&store).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_handle_survives_replacement_and_mismatch_is_rejected() {
+        use std::io::Read;
+        let t = tmp("handle");
+        let g = PathGrants::default();
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        let (path, mut file) = check_file(&s(t.0.join("lib/a.wav")), &g, &["wav"], 10).unwrap();
+        std::fs::rename(&path, t.0.join("lib/old.wav")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(validate_handle(&file, &path).is_err());
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"x");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(t.0.join("outside/b.wav"), &path).unwrap();
+        assert!(validate_handle(&file, &path).is_err());
     }
 
     #[test]
@@ -448,11 +611,94 @@ mod tests {
     }
 
     #[test]
+    fn parents_of_broad_directories_are_rejected() {
+        for p in ["/usr", "/etc", "/var", "/tmp"] {
+            if let Ok(c) = Path::new(p).canonicalize() {
+                for a in c.ancestors() {
+                    assert!(!is_valid_root(a), "{} accepted", a.display());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn failed_store_write_does_not_grant_access() {
         let t = tmp("write-failure");
         let g = PathGrants::with_store(t.0.join("lib/a.wav/granted_dirs.json"));
         assert!(g.grant_directory(&t.0.join("outside")).is_err());
         assert!(check_dir(&s(t.0.join("outside")), &g).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_is_rejected_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let t = tmp("fifo");
+        let path = t.0.join("lib/pipe.wav");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let g = PathGrants::default();
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        assert!(check_file(&s(path), &g, &["wav"], 10)
+            .unwrap_err()
+            .contains("Not a file"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn out_of_scope_file_is_never_opened() {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let t = tmp("no-open");
+        let path = t.0.join("outside/b.wav");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: inotify_init1 returns a new owned descriptor on success.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0);
+        let mut watcher = unsafe { std::fs::File::from_raw_fd(fd) };
+        // SAFETY: watcher is live and name is NUL-terminated.
+        assert!(
+            unsafe { libc::inotify_add_watch(watcher.as_raw_fd(), name.as_ptr(), libc::IN_OPEN) }
+                >= 0
+        );
+        assert!(check_file(&s(path), &PathGrants::default(), &["wav"], 10)
+            .unwrap_err()
+            .contains("Access denied"));
+        assert_eq!(
+            watcher.read(&mut [0u8; 4096]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn home_detection_without_home_environment() {
+        const CHILD: &str = "KICKS_HOME_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let home = dirs::home_dir().expect("platform home lookup without HOME");
+            assert!(!is_valid_root(&home.canonicalize().unwrap()));
+            return;
+        }
+        assert!(std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "path_guard::tests::home_detection_without_home_environment"
+            ])
+            .env_remove("HOME")
+            .env(CHILD, "1")
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[test]
+    fn canonical_broad_directories_are_rejected() {
+        for path in ["/usr", "/etc", "/var", "/tmp", "/home", "/Users"] {
+            if let Ok(canonical) = Path::new(path).canonicalize() {
+                assert!(!is_valid_root(&canonical));
+            }
+        }
     }
 
     #[test]

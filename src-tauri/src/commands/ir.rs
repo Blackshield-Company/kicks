@@ -35,7 +35,7 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let Ok(fpath) = crate::path_guard::check_file(
+            let Ok((fpath, file)) = crate::path_guard::check_file(
                 &entry.path().to_string_lossy(),
                 &state.path_grants,
                 &["wav", "irs", "nam"],
@@ -59,7 +59,7 @@ pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
                 .unwrap_or_default();
 
             // Try to parse WAV files for metadata
-            let info = match parse_wav_metadata(&fpath) {
+            let info = match parse_wav_metadata_handle(file) {
                 Some(meta) => IrFileInfo {
                     path: fpath.to_string_lossy().to_string(),
                     name,
@@ -153,7 +153,11 @@ fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
         return None;
     }
 
-    let reader = hound::WavReader::open(path).ok()?;
+    parse_wav_metadata_handle(std::fs::File::open(path).ok()?)
+}
+
+fn parse_wav_metadata_handle(file: std::fs::File) -> Option<(u32, u32, u16)> {
+    let reader = hound::WavReader::new(std::io::BufReader::new(file)).ok()?;
     let spec = reader.spec();
     let sample_count = reader.duration();
     let channels = spec.channels;
@@ -165,7 +169,7 @@ fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
 /// Load an impulse response file into the Cab plugin.
 #[tauri::command]
 pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoadResult, String> {
-    let fpath = crate::path_guard::check_file(
+    let (fpath, file) = crate::path_guard::check_file(
         &path,
         &state.path_grants,
         &["wav"],
@@ -174,8 +178,8 @@ pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoad
     let fpath = fpath.as_path();
 
     // Read WAV file and extract float samples
-    let mut reader =
-        hound::WavReader::open(fpath).map_err(|e| format!("Failed to open WAV: {}", e))?;
+    let mut reader = hound::WavReader::new(std::io::BufReader::new(file))
+        .map_err(|e| format!("Failed to open WAV: {}", e))?;
     let spec = reader.spec();
 
     let sample_rate = spec.sample_rate as f32;
@@ -336,7 +340,7 @@ pub fn scan_ir_directory(
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in entries.flatten() {
-        let Ok(fpath) = crate::path_guard::check_file(
+        let Ok((fpath, file)) = crate::path_guard::check_file(
             &entry.path().to_string_lossy(),
             &state.path_grants,
             &["wav", "irs", "nam"],
@@ -359,7 +363,7 @@ pub fn scan_ir_directory(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let info = match parse_wav_metadata(&fpath) {
+        let info = match parse_wav_metadata_handle(file) {
             Some((sample_rate, sample_count, channels)) => IrFileInfo {
                 path: fpath.to_string_lossy().to_string(),
                 name,

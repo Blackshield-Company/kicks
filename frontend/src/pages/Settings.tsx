@@ -356,7 +356,7 @@ export function Settings() {
       {/* File Directories */}
       <section className="border border-[var(--border)] rounded-xl p-4 bg-[var(--bg-surface)]">
         <h3 className="text-sm font-medium text-[var(--text)] mb-3">File Directories</h3>
-        <p className="text-xs text-[var(--text-muted)] mb-3">Choose library folders each session to approve access, then save settings.</p>
+        <p className="text-xs text-[var(--text-muted)] mb-3">Folders chosen with the folder picker are remembered across restarts. Editing settings alone does not approve access.</p>
         {directoryError && <p role="alert" className="text-sm text-[var(--danger)]">{directoryError}</p>}
         <div className="flex flex-col gap-3">
           <label className="flex items-center justify-between">

@@ -39,7 +39,7 @@ pub fn list_nam_files(state: State<'_, AppState>) -> Vec<NamFileInfo> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let Ok(fpath) = crate::path_guard::check_file(
+            let Ok((fpath, _file)) = crate::path_guard::check_file(
                 &entry.path().to_string_lossy(),
                 &state.path_grants,
                 &["nam"],
@@ -84,7 +84,7 @@ pub fn scan_nam_directory(
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in entries.flatten() {
-        let Ok(fpath) = crate::path_guard::check_file(
+        let Ok((fpath, _file)) = crate::path_guard::check_file(
             &entry.path().to_string_lossy(),
             &state.path_grants,
             &["nam"],
@@ -121,7 +121,7 @@ pub fn scan_nam_directory(
 pub fn load_nam_model(
     state: State<'_, AppState>, path: String,
 ) -> Result<NamModelLoadResult, String> {
-    let resolved = crate::path_guard::check_file(
+    let (resolved, file) = crate::path_guard::check_file(
         &path,
         &state.path_grants,
         &["nam"],
@@ -135,8 +135,9 @@ pub fn load_nam_model(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let (neural_model, num_parameters) = kicks_dsp::NeuralModel::from_file(&path)
-        .map_err(|e| format!("Failed to load NAM model: {}", e))?;
+    let (neural_model, num_parameters) =
+        kicks_dsp::NeuralModel::from_reader(std::io::BufReader::new(file))
+            .map_err(|e| format!("Failed to load NAM model: {}", e))?;
 
     let architecture = neural_model.architecture().to_string();
     let sample_rate = neural_model.sample_rate();

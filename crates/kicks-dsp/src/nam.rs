@@ -611,8 +611,12 @@ impl NeuralModel {
             anyhow::bail!("NAM file not found: {}", path);
         }
 
-        let bytes = fs::read(file_path)?;
-        let nam: NamFile = serde_json::from_slice(&bytes)?;
+        Self::from_reader(std::io::BufReader::new(fs::File::open(file_path)?))
+    }
+
+    /// Parse a NAM model from an already opened and validated source.
+    pub fn from_reader(reader: impl std::io::Read) -> anyhow::Result<(Self, usize)> {
+        let nam: NamFile = serde_json::from_reader(reader)?;
 
         let sample_rate = nam.sample_rate.unwrap_or(48000);
         let arch_name = nam.architecture.clone();
