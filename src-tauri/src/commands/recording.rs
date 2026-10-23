@@ -14,6 +14,7 @@ use tauri::State;
 #[derive(Debug, Serialize, PartialEq)]
 pub struct RecordingStatus {
     pub recording: bool,
+    pub error: Option<String>,
     pub path: Option<String>,
     pub seconds: f64,
     pub dropped_frames: u64,
@@ -25,6 +26,9 @@ fn recordings_dir() -> std::path::PathBuf {
 
 pub(crate) fn start_recording_in(state: &AppState, dir: &Path) -> Result<String, String> {
     let mut slot = state.recording.lock_or_recover();
+    if slot.as_ref().is_some_and(|rec| rec.completion().is_some()) {
+        let _ = stop_recording_locked(state, &mut slot);
+    }
     if slot.is_some() {
         return Err("Already recording".into());
     }
@@ -46,11 +50,14 @@ pub(crate) fn start_recording_in(state: &AppState, dir: &Path) -> Result<String,
 }
 
 pub(crate) fn stop_recording_impl(state: &AppState) -> Result<RecordingSummary, String> {
-    let rec = state
-        .recording
-        .lock_or_recover()
-        .take()
-        .ok_or("Not recording")?;
+    let mut slot = state.recording.lock_or_recover();
+    stop_recording_locked(state, &mut slot)
+}
+
+pub(crate) fn stop_recording_locked(
+    state: &AppState, slot: &mut Option<Recording>,
+) -> Result<RecordingSummary, String> {
+    let rec = slot.take().ok_or("Not recording")?;
     if let Some(engine) = state.engine.lock_or_recover().clone() {
         // Remove the tap under the lock, drop it after.
         let tap = engine.lock_or_recover().set_record_tap(None);
@@ -73,8 +80,16 @@ pub(crate) fn recording_status_impl(state: &AppState) -> RecordingStatus {
                 .clone()
                 .map(|e| e.lock_or_recover().sample_rate())
                 .unwrap_or(48_000.0);
+            let completion = rec.completion();
+            if completion.is_some() {
+                if let Some(engine) = state.engine.lock_or_recover().clone() {
+                    let tap = engine.lock_or_recover().set_record_tap(None);
+                    drop(tap);
+                }
+            }
             RecordingStatus {
-                recording: true,
+                recording: completion.is_none(),
+                error: completion.and_then(Result::err),
                 path: Some(rec.path().display().to_string()),
                 seconds: rec.frames() as f64 / sr,
                 dropped_frames: rec.dropped_frames(),
@@ -82,6 +97,7 @@ pub(crate) fn recording_status_impl(state: &AppState) -> RecordingStatus {
         }
         None => RecordingStatus {
             recording: false,
+            error: None,
             path: None,
             seconds: 0.0,
             dropped_frames: 0,
@@ -124,6 +140,101 @@ mod tests {
         assert!(start_recording_in(&state, &dir()).is_err());
         assert!(stop_recording_impl(&state).is_err());
         assert!(!recording_status_impl(&state).recording);
+    }
+
+    #[test]
+    fn engine_shutdown_finalizes_recording_and_allows_recording_after_restart() {
+        let state = AppState::for_test();
+        let mut eng = KicksEngine::new();
+        eng.init(48_000.0, 256).unwrap();
+        let eng = Arc::new(Mutex::new(eng));
+        *state.engine.lock().unwrap() = Some(eng.clone());
+        let path = start_recording_in(&state, &dir().join("shutdown")).unwrap();
+        let (_tx, mut rx) = param_channel();
+        eng.lock()
+            .unwrap()
+            .process_block(&mut rx, &[0.1; 480], &mut [0.0; 480]);
+        super::super::engine::stop_engine_impl(&state).unwrap();
+        assert!(state.engine.lock().unwrap().is_none());
+        assert!(state.recording.lock().unwrap().is_none());
+        assert!(!eng.lock().unwrap().is_recording());
+        assert!(!recording_status_impl(&state).recording);
+        assert_eq!(hound::WavReader::open(&path).unwrap().duration(), 480);
+
+        let mut restarted = KicksEngine::new();
+        restarted.init(48_000.0, 256).unwrap();
+        let restarted = Arc::new(Mutex::new(restarted));
+        *state.engine.lock().unwrap() = Some(restarted.clone());
+        let next = start_recording_in(&state, &dir().join("shutdown")).unwrap();
+        assert!(recording_status_impl(&state).recording);
+        restarted
+            .lock()
+            .unwrap()
+            .process_block(&mut rx, &[0.2; 256], &mut [0.0; 256]);
+        assert_eq!(stop_recording_impl(&state).unwrap().frames, 256);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(next).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn failed_recording() -> (AppState, Arc<Mutex<KicksEngine>>) {
+        let state = AppState::for_test();
+        let mut eng = KicksEngine::new();
+        eng.init(48_000.0, 256).unwrap();
+        // The buffered header succeeds; /dev/full fails when audio is flushed.
+        let (tap, rec) = Recording::start(Path::new("/dev/full"), 48_000).unwrap();
+        eng.set_record_tap(Some(tap));
+        let eng = Arc::new(Mutex::new(eng));
+        *state.engine.lock().unwrap() = Some(eng.clone());
+        *state.recording.lock().unwrap() = Some(rec);
+        let (_tx, mut rx) = param_channel();
+        for _ in 0..32 {
+            eng.lock()
+                .unwrap()
+                .process_block(&mut rx, &[0.1; 256], &mut [0.0; 256]);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state
+            .recording
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .completion()
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < deadline, "writer did not fail");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        (state, eng)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn status_exposes_writer_failure_detaches_tap_and_allows_restart() {
+        let (state, eng) = failed_recording();
+        assert!(eng.lock().unwrap().is_recording());
+        let status = recording_status_impl(&state);
+        assert!(!status.recording);
+        assert!(status.error.is_some());
+        assert!(!eng.lock().unwrap().is_recording());
+        // The error remains visible across polls until another take starts.
+        assert_eq!(recording_status_impl(&state).error, status.error);
+        let path = start_recording_in(&state, &dir().join("recovery")).unwrap();
+        assert!(recording_status_impl(&state).recording);
+        assert!(recording_status_impl(&state).error.is_none());
+        stop_recording_impl(&state).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shutdown_clears_engine_and_recording_even_when_writer_failed() {
+        let (state, eng) = failed_recording();
+        assert!(super::super::engine::stop_engine_impl(&state).is_err());
+        assert!(state.engine.lock().unwrap().is_none());
+        assert!(state.recording.lock().unwrap().is_none());
+        assert!(!eng.lock().unwrap().is_recording());
     }
 
     #[test]

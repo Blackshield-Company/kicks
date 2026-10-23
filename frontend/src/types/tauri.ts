@@ -83,6 +83,7 @@ export interface AudioStatus {
 /** Live WAV recording state (DI on channel 1, processed on channel 2). */
 export interface RecordingStatus {
   recording: boolean;
+  error: string | null;
   path: string | null;
   seconds: number;
   dropped_frames: number;

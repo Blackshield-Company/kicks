@@ -13,7 +13,7 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -24,12 +24,16 @@ const RING_SECONDS: usize = 4;
 /// Audio-thread side of a recording.
 pub struct RecordTap {
     prod: HeapProd<f32>,
+    finished: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
 }
 
 impl RecordTap {
     /// Push one block. Allocation-free and wait-free.
     pub fn push(&mut self, dry: &[f32], wet: &[f32]) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
         let n = dry.len().min(wet.len());
         let fit = n.min(self.prod.vacant_len() / 2);
         for i in 0..fit {
@@ -58,6 +62,8 @@ pub struct Recording {
     stop: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+    finished: Arc<AtomicBool>,
+    completion: Arc<Mutex<Option<Result<(), String>>>>,
     writer: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -71,23 +77,43 @@ impl Recording {
             bits_per_sample: 32,
             sample_format: hound::SampleFormat::Float,
         };
-        let mut wav = hound::WavWriter::create(path, spec)?;
+        let wav = hound::WavWriter::create(path, spec)?;
+        Self::start_writer(path, sample_rate, wav)
+    }
+
+    fn start_writer<W: std::io::Write + std::io::Seek + Send + 'static>(
+        path: &Path, sample_rate: u32, mut wav: hound::WavWriter<W>,
+    ) -> anyhow::Result<(RecordTap, Recording)> {
         let cap = (sample_rate as usize * 2 * RING_SECONDS).max(8192);
         let (prod, cons) = HeapRb::<f32>::new(cap).split();
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicU64::new(0));
+        let finished = Arc::new(AtomicBool::new(false));
+        let completion = Arc::new(Mutex::new(None));
+        let (finished2, completion2) = (finished.clone(), completion.clone());
         let (stop2, frames2) = (stop.clone(), frames.clone());
         let writer = std::thread::Builder::new()
             .name("kicks-recorder".into())
             .spawn(move || -> anyhow::Result<()> {
-                drain_loop(cons, &mut wav, &stop2, &frames2)?;
-                wav.finalize()?;
-                Ok(())
+                let result = (|| {
+                    drain_loop(cons, &mut wav, &stop2, &frames2)?;
+                    wav.finalize()?;
+                    Ok(())
+                })();
+                *completion2.lock().unwrap() = Some(
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e: &anyhow::Error| e.to_string()),
+                );
+                finished2.store(true, Ordering::Release);
+                result
             })?;
         Ok((
             RecordTap {
                 prod,
+                finished: finished.clone(),
                 dropped: dropped.clone(),
             },
             Recording {
@@ -96,9 +122,27 @@ impl Recording {
                 stop,
                 frames,
                 dropped,
+                finished,
+                completion,
                 writer: Some(writer),
             },
         ))
+    }
+
+    /// Writer result, available without stopping the recording. Control thread only.
+    pub fn completion(&self) -> Option<Result<(), String>> {
+        if self.finished.load(Ordering::Acquire) {
+            return self.completion.lock().unwrap().clone();
+        }
+        if self.writer.as_ref().is_some_and(|h| h.is_finished()) {
+            return self
+                .completion
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| Some(Err("recorder thread panicked".into())));
+        }
+        None
     }
 
     pub fn path(&self) -> &Path {
@@ -233,6 +277,62 @@ mod tests {
         let sum = rec.stop().unwrap();
         assert_eq!(sum.frames + sum.dropped_frames, 100_000);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn writer_failure_is_published_and_tap_stops_accepting_audio() {
+        struct FailingWriter {
+            inner: std::io::Cursor<Vec<u8>>,
+            fail: Arc<AtomicBool>,
+        }
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.fail.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::other("disk full"));
+                }
+                std::io::Write::write(&mut self.inner, buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl std::io::Seek for FailingWriter {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                std::io::Seek::seek(&mut self.inner, pos)
+            }
+        }
+        let fail = Arc::new(AtomicBool::new(false));
+        let wav = hound::WavWriter::new(
+            FailingWriter {
+                inner: std::io::Cursor::new(Vec::new()),
+                fail: fail.clone(),
+            },
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        let (mut tap, rec) = Recording::start_writer(Path::new("failed.wav"), 48_000, wav).unwrap();
+        assert_eq!(rec.completion(), None);
+        fail.store(true, Ordering::Relaxed);
+        tap.push(&[0.1; 480], &[0.2; 480]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while rec.completion().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(rec.completion().unwrap().unwrap_err().contains("disk full"));
+        let vacant = tap.prod.vacant_len();
+        tap.push(&[0.1; 480], &[0.2; 480]);
+        assert_eq!(tap.prod.vacant_len(), vacant);
+        drop(tap);
+        assert!(rec.stop().unwrap_err().to_string().contains("disk full"));
     }
 
     #[test]

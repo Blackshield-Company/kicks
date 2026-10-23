@@ -86,6 +86,7 @@ export function RecordControl() {
           </span>
         )}
       </div>
+      {status?.error && <span role="alert">Recording failed: {status.error}</span>}
       {message && <span className="text-xs text-[var(--text-muted)]">{message}</span>}
     </div>
   );
