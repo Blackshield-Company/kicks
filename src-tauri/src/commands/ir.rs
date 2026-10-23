@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ pub struct IrFileInfo {
 /// List all IR files in the configured IR directories.
 #[tauri::command]
 pub fn list_ir_files(state: State<'_, AppState>) -> Vec<IrFileInfo> {
-    let config = state.config.lock().unwrap();
+    let config = state.config.lock_or_recover();
     let mut results = Vec::new();
 
     for dir in &config.ir_directories {

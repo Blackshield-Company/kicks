@@ -1,3 +1,4 @@
+use crate::sync::LockOrRecover;
 use kicks_core::persistence;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -81,7 +82,7 @@ pub fn list_midi_devices(state: State<'_, AppState>) -> Result<Vec<MidiDeviceInf
 /// Get the current MIDI configuration.
 #[tauri::command]
 pub fn get_midi_config(state: State<'_, AppState>) -> MidiConfigPayload {
-    let config = state.midi_config.lock().unwrap();
+    let config = state.midi_config.lock_or_recover();
     MidiConfigPayload::from(&*config)
 }
 
