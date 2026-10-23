@@ -83,12 +83,40 @@ fn update_store(store: &Path, new_root: Option<&Path>) -> Result<HashSet<PathBuf
     // `lock` is released when dropped here.
 }
 
+#[cfg(windows)]
+fn normalized_windows_path(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    let mut normalized = PathBuf::new();
+    // Strip only the namespace marker. Preserve all on-disk spelling, including
+    // non-Unicode names: case folding can authorize distinct NTFS siblings.
+    if let Some(Component::Prefix(prefix)) = components.next() {
+        match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => normalized.push(format!("{}:", char::from(drive))),
+            Prefix::VerbatimUNC(server, share) => {
+                let mut unc = std::ffi::OsString::from(r"\\");
+                unc.push(server);
+                unc.push(r"\");
+                unc.push(share);
+                normalized.push(unc);
+            }
+            _ => normalized.push(prefix.as_os_str()),
+        }
+        for component in components {
+            normalized.push(component.as_os_str());
+        }
+        normalized
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn paths_equal(a: &Path, b: &Path) -> bool {
     #[cfg(windows)]
     {
-        a.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+        normalized_windows_path(a)
+            .components()
+            .eq(normalized_windows_path(b).components())
     }
     #[cfg(not(windows))]
     {
@@ -96,28 +124,98 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+fn path_starts_with(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        normalized_windows_path(path).starts_with(normalized_windows_path(root))
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
+}
+
+// Folding is restricted to deny checks, where matching extra paths is safe.
+fn deny_path_starts_with(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    let (path, root) = (normalized_windows_path(path), normalized_windows_path(root));
+    Path::new(&path.to_string_lossy().to_lowercase())
+        .starts_with(root.to_string_lossy().to_lowercase())
+}
+
+fn deny_paths_equal(a: &Path, b: &Path) -> bool {
+    deny_path_starts_with(a, b) && deny_path_starts_with(b, a)
+}
+
 fn is_valid_root(path: &Path) -> bool {
     let Ok(canonical) = path.canonicalize() else {
         return false;
     };
-    #[cfg(not(windows))]
-    let broad = ["/usr", "/etc", "/var", "/tmp", "/home", "/Users"];
-    #[cfg(windows)]
-    let broad = [r"C:\", r"C:\Users", r"C:\Windows"];
+
     if path.parent().is_none()
         || dirs::home_dir()
             .and_then(|home| home.canonicalize().ok())
-            .is_some_and(|home| home.ancestors().any(|p| paths_equal(p, &canonical)))
-        || broad
-            .iter()
-            .filter_map(|p| Path::new(p).canonicalize().ok())
-            // Reject a denylisted folder and anything containing one
-            // (e.g. macOS `/private`, which holds `/private/tmp`).
-            .any(|p| p.ancestors().any(|a| paths_equal(a, &canonical)))
+            .is_some_and(|home| home.ancestors().any(|p| deny_paths_equal(p, &canonical)))
+        || is_broad_root(&canonical)
     {
         return false;
     }
     paths_equal(&canonical, path) && canonical.is_dir()
+}
+
+fn is_broad_root(canonical: &Path) -> bool {
+    #[cfg(not(windows))]
+    let broad = [
+        "/usr",
+        "/etc",
+        "/var",
+        "/tmp",
+        "/home",
+        "/Users",
+        "/opt",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/root",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/boot",
+        "/etc/ssl",
+        "/usr/lib",
+        "/usr/share",
+        "/srv",
+        "/run",
+        "/mnt",
+        #[cfg(target_os = "macos")]
+        "/System",
+        #[cfg(target_os = "macos")]
+        "/Library",
+        #[cfg(target_os = "macos")]
+        "/Applications",
+    ];
+    #[cfg(windows)]
+    let broad: Vec<String> = ('A'..='Z')
+        .flat_map(|drive| {
+            [
+                "",
+                "Users",
+                "Windows",
+                "Program Files",
+                "Program Files (x86)",
+            ]
+            .map(move |dir| format!("{drive}:\\{dir}"))
+        })
+        .collect();
+    broad
+        .iter()
+        .map(|p| {
+            Path::new(p)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(p))
+        })
+        // Reject a blocked directory and any ancestor containing it.
+        .any(|p| deny_path_starts_with(&p, canonical))
 }
 
 fn open_private(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
@@ -140,6 +238,22 @@ fn open_private(path: &Path, create_new: bool) -> std::io::Result<std::fs::File>
 /// Write to a fresh, exclusively created temp file, then rename over `store`.
 /// The temp file is removed on every failure path.
 fn write_atomic(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_sync(store, bytes, |parent| {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(parent)?.sync_all()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = parent;
+            Ok(())
+        }
+    })
+}
+
+fn write_atomic_with_sync(
+    store: &Path, bytes: &[u8], sync_parent: impl Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::io::Write;
     struct Cleanup<'a>(&'a Path, bool);
     impl Drop for Cleanup<'_> {
@@ -165,9 +279,12 @@ fn write_atomic(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
         drop(f);
         std::fs::rename(&tmp, store)?;
         guard.1 = false;
-        // Directory fsync is Unix-only; Windows does not support this directory open/sync pattern.
-        #[cfg(unix)]
-        std::fs::File::open(store.parent().unwrap_or(Path::new(".")))?.sync_all()?;
+        if let Err(e) = sync_parent(store.parent().unwrap_or(Path::new("."))) {
+            tracing::warn!(
+                "Directory grant saved, but parent directory sync failed: {}",
+                e
+            );
+        }
         return Ok(());
     }
 }
@@ -220,18 +337,21 @@ impl PathGrants {
         self.roots
             .lock_or_recover()
             .iter()
-            .any(|root| path.starts_with(root))
+            .any(|root| path_starts_with(path, root))
     }
 
     fn has_file(&self, canonical: &Path) -> bool {
-        self.picked.lock_or_recover().contains(canonical)
-    }
-
-    fn has_file_in(&self, canonical_dir: &Path) -> bool {
         self.picked
             .lock_or_recover()
             .iter()
-            .any(|p| p.parent() == Some(canonical_dir))
+            .any(|p| paths_equal(p, canonical))
+    }
+
+    fn has_file_in(&self, canonical_dir: &Path) -> bool {
+        self.picked.lock_or_recover().iter().any(|p| {
+            p.parent()
+                .is_some_and(|parent| paths_equal(parent, canonical_dir))
+        })
     }
 }
 
@@ -285,6 +405,22 @@ pub fn check_file(
         return Err("Access denied: file is outside the approved library folders".into());
     }
     Ok((canonical, file))
+}
+
+/// Read at most the cap plus one sentinel byte, even if the file grows.
+pub fn read_capped(
+    reader: impl std::io::Read, cap: u64,
+) -> Result<std::io::Cursor<Vec<u8>>, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > cap {
+        return Err(format!("File too large (limit {cap})"));
+    }
+    Ok(std::io::Cursor::new(bytes))
 }
 
 /// Reject replacement of the canonical path between resolution and opening.
@@ -363,6 +499,121 @@ pub fn check_dir(dir: &str, grants: &PathGrants) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_read_rejects_growth_and_stops_at_sentinel() {
+        use std::io::Cursor;
+        let mut source = Cursor::new(b"123456789".to_vec());
+        assert!(read_capped(&mut source, 4)
+            .unwrap_err()
+            .contains("too large"));
+        assert_eq!(source.position(), 5);
+        assert_eq!(read_capped(&b"1234"[..], 4).unwrap().into_inner(), b"1234");
+    }
+
+    #[test]
+    fn parent_sync_failure_after_rename_is_success() {
+        let t = tmp("sync-failure");
+        let store = t.0.join("grants.json");
+        write_atomic_with_sync(&store, b"[]", |_| Err(std::io::Error::other("injected"))).unwrap();
+        assert_eq!(std::fs::read(&store).unwrap(), b"[]");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_folders_are_blocked_on_every_drive() {
+        for drive in 'A'..='Z' {
+            for name in ["Windows", "Program Files", "Program Files (x86)"] {
+                assert!(is_broad_root(Path::new(&format!("{drive}:\\{name}"))));
+            }
+            assert!(!is_broad_root(Path::new(&format!(
+                "{drive}:\\Windows\\IRs"
+            ))));
+        }
+    }
+
+    #[test]
+    fn capped_handle_read_rejects_file_growth_after_validation() {
+        let t = tmp("growth");
+        let g = PathGrants::default();
+        let path = t.0.join("lib/a.wav");
+        g.grant(&path);
+        let (_, file) = check_file(&s(path.clone()), &g, &["wav"], 4).unwrap();
+        std::fs::write(path, b"12345").unwrap();
+        assert!(read_capped(file, 4).unwrap_err().contains("too large"));
+    }
+
+    #[test]
+    fn authorization_is_exact_but_deny_matching_folds_case() {
+        let root = Path::new("D:/Libraries/IR");
+        assert!(path_starts_with(Path::new("D:/Libraries/IR/A.wav"), root));
+        assert!(!path_starts_with(Path::new("D:/Libraries/ir/A.wav"), root));
+        assert!(!path_starts_with(Path::new("D:/Libraries/IR2/A.wav"), root));
+        assert!(!paths_equal(
+            Path::new("D:/Libraries/IR/A.wav"),
+            Path::new("D:/Libraries/IR/a.wav")
+        ));
+        assert!(deny_paths_equal(root, Path::new("d:/libraries/ir")));
+        assert!(deny_path_starts_with(
+            Path::new("D:/Libraries/IR/A.wav"),
+            Path::new("d:/libraries/ir")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_authorization_normalizes_only_verbatim_prefixes() {
+        for (plain, verbatim) in [
+            (r"D:\Libraries\IR", r"\\?\D:\Libraries\IR"),
+            (r"\\server\share\IR", r"\\?\UNC\server\share\IR"),
+        ] {
+            assert!(paths_equal(Path::new(plain), Path::new(verbatim)));
+            assert!(paths_equal(Path::new(verbatim), Path::new(plain)));
+            assert!(path_starts_with(
+                &Path::new(verbatim).join("A.wav"),
+                Path::new(plain)
+            ));
+            assert!(!paths_equal(
+                Path::new(plain),
+                Path::new(&verbatim.to_lowercase())
+            ));
+        }
+        let g = PathGrants::default();
+        g.roots
+            .lock_or_recover()
+            .insert(PathBuf::from(r"\\?\D:\Libraries\IR"));
+        assert!(g.under_root(Path::new(r"D:\Libraries\IR\A.wav")));
+        assert!(!g.under_root(Path::new(r"D:\Libraries\ir\A.wav")));
+        g.picked
+            .lock_or_recover()
+            .insert(PathBuf::from(r"\\?\D:\Picked\A.wav"));
+        assert!(g.has_file(Path::new(r"D:\Picked\A.wav")));
+        assert!(!g.has_file(Path::new(r"D:\Picked\a.wav")));
+        assert!(!g.has_file_in(Path::new(r"D:\picked")));
+        assert!(deny_paths_equal(
+            Path::new(r"\\?\D:\WINDOWS"),
+            Path::new(r"d:\Windows")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_handle_and_store_revalidation_reject_changed_case() {
+        let t = tmp("windows-case");
+        let path = t.0.join("lib/a.wav").canonicalize().unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let wrong_case = path.with_file_name("A.wav");
+        assert!(validate_handle(&file, &path).is_ok());
+        assert!(validate_handle(&file, &wrong_case).is_err());
+        let root = t.0.join("lib").canonicalize().unwrap();
+        let store = t.0.join("grants.json");
+        std::fs::write(
+            &store,
+            serde_json::to_vec(&vec![root.with_file_name("LIB")]).unwrap(),
+        )
+        .unwrap();
+        assert!(load_valid_roots(&store).is_empty());
+    }
 
     struct Tmp(PathBuf);
     impl Drop for Tmp {
@@ -694,7 +945,31 @@ mod tests {
 
     #[test]
     fn canonical_broad_directories_are_rejected() {
-        for path in ["/usr", "/etc", "/var", "/tmp", "/home", "/Users"] {
+        for path in [
+            "/usr",
+            "/etc",
+            "/var",
+            "/tmp",
+            "/home",
+            "/Users",
+            "/opt",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/root",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/boot",
+            "/etc/ssl",
+            "/usr/lib",
+            #[cfg(target_os = "macos")]
+            "/System",
+            #[cfg(target_os = "macos")]
+            "/Library",
+            #[cfg(target_os = "macos")]
+            "/Applications",
+        ] {
             if let Ok(canonical) = Path::new(path).canonicalize() {
                 assert!(!is_valid_root(&canonical));
             }

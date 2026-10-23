@@ -112,7 +112,13 @@ pub async fn pick_ir_file(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            let info = match parse_wav_metadata(&path) {
+            let (_, file) = crate::path_guard::check_file(
+                &path_str,
+                &state.path_grants,
+                &["wav", "irs", "nam"],
+                crate::path_guard::MAX_IR_BYTES,
+            )?;
+            let info = match parse_wav_metadata_handle(file) {
                 Some((sample_rate, sample_count, channels)) => IrFileInfo {
                     path: path.to_string_lossy().to_string(),
                     name,
@@ -141,23 +147,9 @@ pub async fn pick_ir_file(
     }
 }
 
-/// Parse a WAV file and return (sample_rate, sample_count, channels).
-fn parse_wav_metadata(path: &std::path::Path) -> Option<(u32, u32, u16)> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-
-    if ext != "wav" {
-        return None;
-    }
-
-    parse_wav_metadata_handle(std::fs::File::open(path).ok()?)
-}
-
 fn parse_wav_metadata_handle(file: std::fs::File) -> Option<(u32, u32, u16)> {
-    let reader = hound::WavReader::new(std::io::BufReader::new(file)).ok()?;
+    let file = crate::path_guard::read_capped(file, crate::path_guard::MAX_IR_BYTES).ok()?;
+    let reader = hound::WavReader::new(file).ok()?;
     let spec = reader.spec();
     let sample_count = reader.duration();
     let channels = spec.channels;
@@ -178,8 +170,9 @@ pub fn load_ir_to_cab(state: State<'_, AppState>, path: String) -> Result<IrLoad
     let fpath = fpath.as_path();
 
     // Read WAV file and extract float samples
-    let mut reader = hound::WavReader::new(std::io::BufReader::new(file))
-        .map_err(|e| format!("Failed to open WAV: {}", e))?;
+    let file = crate::path_guard::read_capped(file, crate::path_guard::MAX_IR_BYTES)?;
+    let mut reader =
+        hound::WavReader::new(file).map_err(|e| format!("Failed to open WAV: {}", e))?;
     let spec = reader.spec();
 
     let sample_rate = spec.sample_rate as f32;
