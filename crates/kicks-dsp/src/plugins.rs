@@ -1536,13 +1536,10 @@ impl PluginRegistry {
     }
 
     pub fn get_parameter(&self, id: &str) -> Option<f32> {
-        // Check local override first
-        if let Some(&val) = self.parameters.get(id) {
-            return Some(val);
-        }
-        if let Some((plugin_name, param_id)) = id.split_once('/') {
+        // Plugin state is authoritative: queued updates bypass the cache.
+        if let Some((plugin_name, param_id)) = id.split_once('/').or_else(|| id.split_once('.')) {
             let i = self.plugins.iter().position(|p| p.name() == plugin_name)?;
-            if param_id == "enabled" {
+            if param_id == "enabled" || param_id == "__enabled" {
                 return self.enabled.get(i).map(|&e| if e { 1.0 } else { 0.0 });
             }
             if param_id == WET_DRY_PARAM {
@@ -1556,7 +1553,7 @@ impl PluginRegistry {
                 return Some(val);
             }
         }
-        None
+        self.parameters.get(id).copied()
     }
 
     pub fn set_parameter(&mut self, id: &str, value: f32) {
@@ -1584,10 +1581,9 @@ impl PluginRegistry {
 
     /// Update only the parameter value HashMap without iterating plugins.
     ///
-    /// Used by the main thread to keep `get_parameter` consistent while
-    /// the actual plugin update goes through the lock-free SPSC queue.
-    /// The audio callback drains the queue and calls `set_parameter`
-    /// (which includes the plugin iteration) before each process cycle.
+    /// Used by the main thread while the actual plugin update goes through
+    /// the lock-free SPSC queue. Readback of known parameters reflects plugin
+    /// state once the audio callback applies the update with `set_parameter_rt`.
     pub fn set_parameter_value(&mut self, id: &str, value: f32) {
         self.parameters.insert(id.to_string(), value);
     }
@@ -1934,6 +1930,24 @@ mod tests {
             half[100],
             expect
         );
+    }
+
+    #[test]
+    fn parameter_readback_uses_plugin_state_after_rt_updates() {
+        let mut r = PluginRegistry::new();
+        r.build_default_chain();
+        r.set_parameter("gain", 0.25);
+        r.set_parameter_rt("gain", 0.75);
+        assert_eq!(r.get_parameter("gain"), Some(0.75));
+        r.set_parameter("amp/drive", 0.25);
+        r.set_parameter_value("amp/drive", 0.5);
+        r.set_parameter_rt("amp/drive", 0.75);
+        assert_eq!(r.get_parameter("amp/drive"), Some(0.75));
+        assert_eq!(r.get_parameter("amp.drive"), Some(0.75));
+        r.set_parameter("boost/enabled", 1.0);
+        r.set_parameter_rt("boost/enabled", 0.0);
+        assert_eq!(r.get_parameter("boost/enabled"), Some(0.0));
+        assert_eq!(r.get_parameter("boost.__enabled"), Some(0.0));
     }
 
     #[test]

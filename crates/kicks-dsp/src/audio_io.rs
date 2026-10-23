@@ -111,7 +111,7 @@ impl CpalAudioIO {
 
             use crate::io_util::{
                 choose_buffer_size, clamp_channel, estimated_latency_ms, extract_channel,
-                write_mono_to_interleaved, AudioStats,
+                input_ring_capacity, write_mono_to_interleaved, AudioStats,
             };
             use std::sync::atomic::Ordering;
 
@@ -164,6 +164,18 @@ impl CpalAudioIO {
                 buffer_size: cpal_bs,
             };
 
+            // Input devices may have a different period range than output devices.
+            let in_default = input_device
+                .as_ref()
+                .map(|dev| dev.default_input_config())
+                .transpose()
+                .context("Input device has no default config")?;
+            let in_range = in_default.as_ref().and_then(|c| match c.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, max } => Some((*min, *max)),
+                cpal::SupportedBufferSize::Unknown => None,
+            });
+            let in_bs = choose_buffer_size(requested_bs, in_range);
+
             let stats = Arc::new(AudioStats::default());
             self.stats = stats.clone();
 
@@ -171,7 +183,17 @@ impl CpalAudioIO {
             // one period of silence so the first output callbacks don't
             // underrun while the input stream spins up.
             let prefill = bs as usize;
-            let ring = HeapRb::<f32>::new((bs as usize * 8).max(4096));
+            // Fixed periods are only requests in CPAL. Reserve for the reported
+            // input maximum, including when output uses an unknown default period.
+            // Without an input bound we cannot safely size a finite ring.
+            let capacity = if input_device.is_some() {
+                input_ring_capacity(bs, in_range)
+                    .context("Input device has no valid callback buffer bound")?
+            } else {
+                (bs as usize * 8).max(4096)
+            };
+            let ring =
+                HeapRb::<f32>::try_new(capacity).context("Failed to allocate input audio ring")?;
             let (mut producer, mut consumer) = ring.split();
             for _ in 0..prefill {
                 let _ = producer.try_push(0.0);
@@ -184,8 +206,8 @@ impl CpalAudioIO {
                     None
                 }
                 Some(dev) => {
-                    let in_channels = dev
-                        .default_input_config()
+                    let in_channels = in_default
+                        .as_ref()
                         .map(|c| c.channels())
                         .unwrap_or(1)
                         .max(1);
@@ -193,7 +215,8 @@ impl CpalAudioIO {
                     let in_config = cpal::StreamConfig {
                         channels: in_channels,
                         sample_rate: sr,
-                        buffer_size: cpal_bs,
+                        buffer_size: in_bs
+                            .map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed),
                     };
                     let mut prod = producer;
                     let in_stats = stats.clone();
@@ -466,33 +489,26 @@ impl jack::ProcessHandler for JackProcessHandler {
 
         let n = ps.n_frames() as usize;
 
-        // Buffers were sized at activation; if JACK grows the period past
-        // that, process what fits rather than allocate in the callback.
-        let n = n.min(self.mono_in.len());
-        let mono_in = &mut self.mono_in[..n];
-        let mono_out = &mut self.mono_out[..n];
-
-        // Mix stereo input to mono for the engine (KicksEngine is mono)
-        for i in 0..n {
-            mono_in[i] = (in_l_buf[i] + in_r_buf[i]) * 0.5;
-        }
-
-        if let Ok(mut eng) = self.engine.try_lock() {
-            match self.param_rx.as_mut() {
-                Some(rx) => eng.process_block(rx, mono_in, mono_out),
-                None => {
-                    if eng.process(mono_in, mono_out).is_err() {
-                        mono_out.fill(0.0);
+        // Reuse the activation-time scratch buffers even if JACK grows its period.
+        process_jack_period(
+            [in_l_buf, in_r_buf],
+            [out_l_buf, out_r_buf],
+            [&mut self.mono_in, &mut self.mono_out],
+            |mono_in, mono_out| {
+                if let Ok(mut eng) = self.engine.try_lock() {
+                    match self.param_rx.as_mut() {
+                        Some(rx) => eng.process_block(rx, mono_in, mono_out),
+                        None => {
+                            if eng.process(mono_in, mono_out).is_err() {
+                                mono_out.fill(0.0);
+                            }
+                        }
                     }
+                } else {
+                    mono_out.fill(0.0);
                 }
-            }
-        } else {
-            mono_out.fill(0.0);
-        }
-
-        // Copy mono output to both stereo channels
-        out_l_buf[..n].copy_from_slice(mono_out);
-        out_r_buf[..n].copy_from_slice(mono_out);
+            },
+        );
 
         // CPU load tracking
         let elapsed = start.elapsed().as_secs_f64();
@@ -503,6 +519,62 @@ impl jack::ProcessHandler for JackProcessHandler {
         }
 
         jack::Control::Continue
+    }
+}
+
+/// Process every frame using bounded, preallocated mono scratch buffers.
+#[cfg(feature = "jack-backend")]
+fn process_jack_period(
+    input: [&[f32]; 2], output: [&mut [f32]; 2], scratch: [&mut [f32]; 2],
+    mut process: impl FnMut(&[f32], &mut [f32]),
+) {
+    let [mono_in, mono_out] = scratch;
+    let capacity = mono_in.len().min(mono_out.len());
+    let [out_l, out_r] = output;
+    if capacity == 0 {
+        out_l.fill(0.0);
+        out_r.fill(0.0);
+        return;
+    }
+    for start in (0..input[0].len()).step_by(capacity) {
+        let end = (start + capacity).min(input[0].len());
+        let n = end - start;
+        for (i, sample) in mono_in[..n].iter_mut().enumerate() {
+            *sample = (input[0][start + i] + input[1][start + i]) * 0.5;
+        }
+        process(&mono_in[..n], &mut mono_out[..n]);
+        out_l[start..end].copy_from_slice(&mono_out[..n]);
+        out_r[start..end].copy_from_slice(&mono_out[..n]);
+    }
+}
+
+#[cfg(all(test, feature = "jack-backend"))]
+mod tests {
+    use super::process_jack_period;
+
+    #[test]
+    fn jack_period_processes_all_frames_including_partial_chunk() {
+        let input_l = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let input_r = [3.0, 4.0, 5.0, 6.0, 7.0];
+        let mut out_l = [f32::NAN; 5];
+        let mut out_r = [f32::NAN; 5];
+        let mut mono_in = [0.0; 2];
+        let mut mono_out = [0.0; 2];
+        let mut frames = 0;
+        process_jack_period(
+            [&input_l, &input_r],
+            [&mut out_l, &mut out_r],
+            [&mut mono_in, &mut mono_out],
+            |input, output| {
+                frames += input.len();
+                for (src, dst) in input.iter().zip(output) {
+                    *dst = src * 2.0;
+                }
+            },
+        );
+        assert_eq!(frames, 5);
+        assert_eq!(out_l, [4.0, 6.0, 8.0, 10.0, 12.0]);
+        assert_eq!(out_r, out_l);
     }
 }
 
