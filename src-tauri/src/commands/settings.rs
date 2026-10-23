@@ -68,7 +68,7 @@ impl From<&KicksConfig> for SettingsPayload {
     }
 }
 
-/// Approve a library directory for this session through a native picker.
+/// Approve and persist a library directory through a native picker.
 /// Settings paths alone never authorize filesystem access.
 #[tauri::command]
 pub async fn pick_library_directory(
@@ -105,6 +105,24 @@ pub fn get_settings(state: State<'_, AppState>) -> SettingsPayload {
 /// with the new settings — no manual stop/start needed.
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> Result<(), String> {
+    apply_settings(&state, settings)?;
+    // ── 4. Persist to disk ──
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    tracing::info!(
+        "Settings saved (sample_rate: {}, buffer_size: {}, backend: {:?})",
+        config.sample_rate,
+        config.buffer_size,
+        config.audio_backend
+    );
+
+    if let Err(e) = kicks_core::persistence::save_config(&config) {
+        tracing::warn!("Failed to persist config: {}", e);
+    }
+
+    Ok(())
+}
+
+fn apply_settings(state: &AppState, settings: SettingsPayload) -> Result<(), String> {
     // ── 1. Snapshot old audio config and detect changes ──
     let (old_sr, old_bs, old_dev, old_in, old_out, old_backend, old_ch) = {
         let cfg = state.config.lock().map_err(|e| e.to_string())?;
@@ -274,19 +292,6 @@ pub fn save_settings(state: State<'_, AppState>, settings: SettingsPayload) -> R
         // If engine wasn't running, the new config will be picked up on next start
     }
 
-    // ── 4. Persist to disk ──
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    tracing::info!(
-        "Settings saved (sample_rate: {}, buffer_size: {}, backend: {:?})",
-        config.sample_rate,
-        config.buffer_size,
-        config.audio_backend
-    );
-
-    if let Err(e) = kicks_core::persistence::save_config(&config) {
-        tracing::warn!("Failed to persist config: {}", e);
-    }
-
     Ok(())
 }
 
@@ -305,6 +310,38 @@ pub fn get_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_payload_neither_grants_nor_persists_directory_access() {
+        let dir =
+            std::env::temp_dir().join(format!("kicks-settings-grants-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("injected")).unwrap();
+        std::fs::create_dir_all(dir.join("picked")).unwrap();
+        let store = dir.join("granted_dirs.json");
+        let mut state = AppState::for_test();
+        state.path_grants = crate::path_guard::PathGrants::with_store(store.clone());
+        state
+            .path_grants
+            .grant_directory(&dir.join("picked"))
+            .unwrap();
+        let before = std::fs::read(&store).unwrap();
+        let injected = dir.join("injected").to_string_lossy().into_owned();
+        let mut payload = SettingsPayload::from(&KicksConfig::default());
+        payload.ir_directories = vec![injected.clone()];
+        payload.nam_directories = vec![injected.clone()];
+        // Exercise the same settings application path used by save_settings,
+        // without persisting application config to the user's real config dir.
+        apply_settings(&state, payload).unwrap();
+        assert_eq!(
+            state.config.lock_or_recover().ir_directories,
+            vec![injected.clone()]
+        );
+        assert!(crate::path_guard::check_dir(&injected, &state.path_grants).is_err());
+        assert_eq!(std::fs::read(&store).unwrap(), before);
+        let reloaded = crate::path_guard::PathGrants::with_store(store);
+        assert!(crate::path_guard::check_dir(&injected, &reloaded).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn payload_without_audio_routing_fields_deserialises() {

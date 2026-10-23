@@ -3,7 +3,7 @@
 //! The webview can call any registered command with any string, so file
 //! commands must not trust the path they are given. A path is accepted only
 //! if, after resolving symlinks and `..`, it is
-//! - inside a directory picked in a native dialog this session, or
+//! - inside a directory picked in a native dialog (persisted across restarts), or
 //! - a file the user picked in a native dialog this session (or a directory
 //!   containing such a file, for scans),
 //!
@@ -20,14 +20,85 @@ pub const MAX_IR_BYTES: u64 = 64 * 1024 * 1024;
 /// Largest NAM model we will read.
 pub const MAX_NAM_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Files and directories the user picked through native dialogs this session.
+/// Native picker grants, independent of frontend-writable settings.
+/// Default is memory-only; production startup explicitly opens the native store.
 #[derive(Default)]
 pub struct PathGrants {
     picked: Mutex<HashSet<PathBuf>>,
     roots: Mutex<HashSet<PathBuf>>,
+    store: Option<PathBuf>,
+}
+
+/// Read the native grant store and keep only entries that still exist, are
+/// directories, and are already canonical (i.e. exactly what was granted).
+fn load_valid_roots(store: &Path) -> HashSet<PathBuf> {
+    let stored = match std::fs::read(store) {
+        Ok(bytes) => match serde_json::from_slice::<Vec<PathBuf>>(&bytes) {
+            Ok(paths) => paths,
+            Err(e) => {
+                tracing::warn!("Invalid directory grant store: {}", e);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("Could not read directory grant store: {}", e);
+            }
+            Vec::new()
+        }
+    };
+    let mut roots = HashSet::new();
+    for path in stored {
+        match path.canonicalize() {
+            Ok(canonical) if canonical.as_os_str() == path.as_os_str() && canonical.is_dir() => {
+                roots.insert(canonical);
+            }
+            _ => tracing::warn!("Dropping invalid directory grant: {}", path.display()),
+        }
+    }
+    roots
 }
 
 impl PathGrants {
+    /// Load only unchanged canonical directory roots and rewrite the pruned store.
+    /// This path is supplied by native startup code, never by an IPC argument.
+    pub fn with_store(store: PathBuf) -> Self {
+        let roots = load_valid_roots(&store);
+        let grants = Self {
+            picked: Mutex::default(),
+            roots: Mutex::new(roots),
+            store: Some(store),
+        };
+        if let Err(e) = grants.persist(&grants.roots.lock_or_recover()) {
+            tracing::warn!("Could not rewrite directory grant store: {}", e);
+        }
+        grants
+    }
+
+    fn persist(&self, roots: &HashSet<PathBuf>) -> Result<(), String> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        // Merge with roots another app instance may have written meanwhile,
+        // re-validating them exactly like startup does.
+        let mut merged = load_valid_roots(store);
+        merged.extend(roots.iter().cloned());
+        let mut paths: Vec<_> = merged.iter().collect();
+        paths.sort();
+        let bytes = serde_json::to_vec_pretty(&paths).map_err(|e| e.to_string())?;
+        if let Some(parent) = store.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = store.with_extension(format!("{}.{}.tmp", std::process::id(), n));
+        kicks_core::persistence::write_private(&tmp, &bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, store).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
+    }
+
     /// Record a dialog-picked file. Ignored if it cannot be resolved.
     pub fn grant(&self, path: &Path) {
         if let Ok(p) = path.canonicalize() {
@@ -41,7 +112,12 @@ impl PathGrants {
         if !canonical.is_dir() {
             return Err("Not a directory".to_string());
         }
-        self.roots.lock_or_recover().insert(canonical.clone());
+        // Serialize mutation and persistence so concurrent picks cannot lose roots.
+        let mut roots = self.roots.lock_or_recover();
+        let mut updated = roots.clone();
+        updated.insert(canonical.clone());
+        self.persist(&updated)?;
+        *roots = updated;
         Ok(canonical)
     }
 
@@ -144,6 +220,112 @@ mod tests {
 
     fn s(p: PathBuf) -> String {
         p.to_string_lossy().into_owned()
+    }
+
+    fn stored_roots(store: &Path) -> Vec<PathBuf> {
+        serde_json::from_slice(&std::fs::read(store).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn picked_directory_survives_restart_but_picked_files_do_not() {
+        let t = tmp("persist");
+        let store = t.0.join("config/granted_dirs.json");
+        let g = PathGrants::with_store(store.clone());
+        let root = g.grant_directory(&t.0.join("lib")).unwrap();
+        g.grant(&t.0.join("outside/b.wav"));
+        assert_eq!(stored_roots(&store), vec![root]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&store).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(g);
+        let reloaded = PathGrants::with_store(store);
+        assert!(check_dir(&s(t.0.join("lib")), &reloaded).is_ok());
+        assert!(check_file(&s(t.0.join("lib/a.wav")), &reloaded, &["wav"], 10).is_ok());
+        assert!(check_file(&s(t.0.join("outside/b.wav")), &reloaded, &["wav"], 10).is_err());
+    }
+
+    #[test]
+    fn reload_prunes_deleted_and_replaced_directories() {
+        let t = tmp("prune");
+        let store = t.0.join("granted_dirs.json");
+        let g = PathGrants::with_store(store.clone());
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        g.grant_directory(&t.0.join("outside")).unwrap();
+        std::fs::remove_dir_all(t.0.join("lib")).unwrap();
+        std::fs::remove_dir_all(t.0.join("outside")).unwrap();
+        std::fs::write(t.0.join("outside"), b"file").unwrap();
+        let reloaded = PathGrants::with_store(store.clone());
+        assert!(reloaded.roots.lock_or_recover().is_empty());
+        assert!(stored_roots(&store).is_empty());
+    }
+
+    #[test]
+    fn reload_rejects_noncanonical_entries_and_malformed_json() {
+        let t = tmp("invalid-store");
+        let store = t.0.join("granted_dirs.json");
+        let noncanonical = t.0.join("lib/../outside");
+        std::fs::write(&store, serde_json::to_vec(&vec![noncanonical]).unwrap()).unwrap();
+        let g = PathGrants::with_store(store.clone());
+        assert!(check_dir(&s(t.0.join("outside")), &g).is_err());
+        assert!(stored_roots(&store).is_empty());
+        for bytes in [b"not json".as_slice(), b"{}", b"[42]"] {
+            std::fs::write(&store, bytes).unwrap();
+            let g = PathGrants::with_store(store.clone());
+            assert!(g.roots.lock_or_recover().is_empty());
+            assert!(stored_roots(&store).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_rejects_a_granted_directory_replaced_by_a_symlink() {
+        let t = tmp("retarget");
+        let store = t.0.join("granted_dirs.json");
+        let g = PathGrants::with_store(store.clone());
+        g.grant_directory(&t.0.join("lib")).unwrap();
+        std::fs::remove_dir_all(t.0.join("lib")).unwrap();
+        std::os::unix::fs::symlink(t.0.join("outside"), t.0.join("lib")).unwrap();
+        let g = PathGrants::with_store(store.clone());
+        assert!(check_dir(&s(t.0.join("lib")), &g).is_err());
+        assert!(check_dir(&s(t.0.join("outside")), &g).is_err());
+        assert!(stored_roots(&store).is_empty());
+    }
+
+    #[test]
+    fn second_instance_does_not_drop_roots_granted_by_first() {
+        let t = tmp("two-instances");
+        let store = t.0.join("granted_dirs.json");
+        let a = PathGrants::with_store(store.clone());
+        let b = PathGrants::with_store(store.clone());
+        let lib = a.grant_directory(&t.0.join("lib")).unwrap();
+        let out = b.grant_directory(&t.0.join("outside")).unwrap();
+        let mut want = vec![lib, out];
+        want.sort();
+        assert_eq!(stored_roots(&store), want);
+        let leftovers = std::fs::read_dir(&t.0)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn failed_store_write_does_not_grant_access() {
+        let t = tmp("write-failure");
+        let g = PathGrants::with_store(t.0.join("lib/a.wav/granted_dirs.json"));
+        assert!(g.grant_directory(&t.0.join("outside")).is_err());
+        assert!(check_dir(&s(t.0.join("outside")), &g).is_err());
     }
 
     #[test]

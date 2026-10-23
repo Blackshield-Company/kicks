@@ -45,7 +45,7 @@ pub struct AppState {
     pub cpu_load: Arc<AtomicU64>,
     /// Active WAV recording (DI + processed), if any.
     pub recording: Mutex<Option<kicks_dsp::recorder::Recording>>,
-    /// Session-only native picker grants, independent of writable settings.
+    /// Native picker grants, independent of writable settings.
     pub path_grants: path_guard::PathGrants,
 }
 
@@ -126,7 +126,9 @@ pub fn run() {
             redo_chain: Mutex::new(Vec::new()),
             cpu_load: Arc::new(AtomicU64::new(0)),
             recording: Mutex::new(None),
-            path_grants: path_guard::PathGrants::default(),
+            path_grants: path_guard::PathGrants::with_store(
+                persistence::config_dir().join("granted_dirs.json"),
+            ),
         })
         .setup(|app| {
             // NOTE: tauri_plugin_log is intentionally NOT registered here —

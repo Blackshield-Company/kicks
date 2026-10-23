@@ -26,7 +26,7 @@ A modern, open-source guitar amp simulator and effects workstation built with **
 
 ### Security notes
 
-- File commands only read IR/NAM files inside the library folders set in Settings, or files you pick in the file dialog. Symlinks and `..` are resolved before the check.
+- File commands only read IR/NAM files inside folders approved through the native folder picker, or files picked in the file dialog. Folder grants survive restarts in the native owner-only `granted_dirs.json` store; startup prunes missing, non-directory, or changed canonical paths. Settings values never grant access. Symlinks and `..` are resolved before the check.
 - The webview runs under a strict Content Security Policy (no `eval`, no inline scripts, network limited to the Tauri IPC).
 - The AI API key is stored in `config.json` in the Kicks config directory, which is written owner-only (mode 0600). It is not yet in the OS keyring.
 
