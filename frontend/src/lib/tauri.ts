@@ -90,7 +90,7 @@ function simulate<T>(cmd: string, _args?: Record<string, unknown>): T {
     case 'list_presets':
       return [] as T;
     case 'recording_status':
-      return { recording: false, path: null, seconds: 0, dropped_frames: 0 } as T;
+      return { recording: false, error: null, path: null, seconds: 0, dropped_frames: 0 } as T;
     case 'start_recording':
       throw new Error('Recording needs the desktop app');
     case 'get_audio_status':
