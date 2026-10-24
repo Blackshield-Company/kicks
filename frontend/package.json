@@ -5,7 +5,7 @@
   "description": "Kicks Guitar Workstation — React frontend for the Tauri desktop app",
   "repository": {
     "type": "git",
-    "url": "https://github.com/synthalorian/kicks.git",
+    "url": "https://github.com/Blackshield-Company/kicks.git",
     "directory": "frontend"
   },
   "author": "synth",
