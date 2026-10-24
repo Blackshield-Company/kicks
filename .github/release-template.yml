@@ -111,7 +111,8 @@ jobs:
         run: |
           shopt -s nullglob
           VERSION="${RELEASE_TAG#v}"
-          # ADAPT: one glob per required asset. Any glob with no match fails.
+          # ADAPT: one glob or exact name per required asset. Fails unless at least one
+          # non-empty file matches.
           expected=(
             "*-${VERSION}-linux*"
             "*-${VERSION}-macos*"
@@ -119,7 +120,8 @@ jobs:
           )
           missing=0
           for pattern in "${expected[@]}"; do
-            matches=( $pattern )
+            matches=()
+            for f in $pattern; do [ -s "$f" ] && matches+=("$f"); done
             if (( ${#matches[@]} == 0 )); then
               echo "::error::Missing expected asset: $pattern"
               missing=1
