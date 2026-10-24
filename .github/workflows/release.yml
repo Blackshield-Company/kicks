@@ -207,7 +207,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG exists; uploading assets (clobber)."
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::Release $RELEASE_TAG is already published; refusing to replace its assets."
+              exit 1
+            fi
+            echo "Draft release $RELEASE_TAG exists; uploading assets (clobber)."
             gh release upload "$RELEASE_TAG" ./* --clobber
           else
             echo "Creating draft release $RELEASE_TAG."
