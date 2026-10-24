@@ -2,7 +2,7 @@
 
 # 🎸 Kicks Guitar Workstation
 
-[![CI](https://github.com/synthalorian/kicks/actions/workflows/ci.yml/badge.svg)](https://github.com/synthalorian/kicks/actions/workflows/ci.yml)
+[![CI](https://github.com/Blackshield-Company/kicks/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackshield-Company/kicks/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A modern, open-source guitar amp simulator and effects workstation built with **Tauri** (Rust) and **React**. Kicks combines real-time DSP, AI-powered tone generation, impulse response loading, NAM model support, MIDI control, and a scene-based live mode — all in a fast, native desktop app.
@@ -63,7 +63,7 @@ kicks/
 
 ```bash
 # 1. Clone
-git clone https://github.com/synthalorian/kicks.git
+git clone https://github.com/Blackshield-Company/kicks.git
 cd kicks
 
 # 2. Install frontend dependencies
