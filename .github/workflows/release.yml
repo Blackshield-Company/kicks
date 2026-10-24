@@ -1,0 +1,223 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Release workflow (from the shared release template)
+#
+# Builds the Kicks Tauri bundles for a tag, verifies them, writes SHA256SUMS
+# and attaches everything to a DRAFT GitHub release. It never publishes a
+# release and never creates tags — review the draft and publish it by hand.
+#
+# Gates: the full CI pipeline (ci.yml: quality, msrv, frontend, security) runs
+# against the tag as a reusable workflow before any bundle is built.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build and attach assets for (e.g. v0.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# One release run per tag at a time; never cancel a half-uploaded release.
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tag being released: the pushed tag, or the dispatch input.
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  # ADAPTED: pre-release gates = the regular CI pipeline, run on the tag.
+  gates:
+    name: Gates
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: refs/tags/${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    permissions:
+      contents: read
+
+  build:
+    name: Release — Tauri bundle (${{ matrix.platform }})
+    needs: [gates]
+    strategy:
+      fail-fast: false
+      matrix:
+        # ADAPTED: same platforms, bundle args and output paths as the former
+        # ci.yml release job.
+        include:
+          - name: linux
+            platform: ubuntu-latest
+            args: '--bundles appimage,deb'
+            bundle-dir: target/release/bundle
+            bundle-globs: 'appimage/*.AppImage deb/*.deb'
+          - name: macos
+            platform: macos-latest
+            args: '--target universal-apple-darwin --bundles dmg'
+            bundle-dir: target/universal-apple-darwin/release/bundle
+            bundle-globs: 'dmg/*.dmg'
+          - name: windows
+            platform: windows-latest
+            args: '--target x86_64-pc-windows-msvc --bundles msi,nsis'
+            bundle-dir: target/x86_64-pc-windows-msvc/release/bundle
+            bundle-globs: 'msi/*.msi nsis/*.exe'
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z._+-]+$ ]]; then
+            echo "::error::Invalid release tag: '$RELEASE_TAG'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      # ADAPTED: build steps carried over unchanged from the ci.yml release job.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjack-jackd2-dev libasound2-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libssl-dev
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "~2.0" --locked
+
+      - name: Build Tauri bundle
+        run: cargo tauri build ${{ matrix.args }}
+
+      # ADAPTED: copy bundles into dist/ flat, keeping Tauri's file names
+      # (e.g. Kicks_0.2.0_amd64.AppImage) exactly as previously published.
+      - name: Stage assets
+        shell: bash
+        env:
+          BUNDLE_DIR: ${{ matrix.bundle-dir }}
+          BUNDLE_GLOBS: ${{ matrix.bundle-globs }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p dist
+          # Split without pathname expansion; globs expand under BUNDLE_DIR.
+          read -ra globs <<< "$BUNDLE_GLOBS"
+          for glob in "${globs[@]}"; do
+            files=( "$BUNDLE_DIR"/$glob )
+            if (( ${#files[@]} == 0 )); then
+              echo "::error::No bundle matched $BUNDLE_DIR/$glob"
+              exit 1
+            fi
+            cp -v "${files[@]}" dist/
+          done
+          ls -la dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kicks-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kicks-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify expected assets
+        shell: bash
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          VERSION="${RELEASE_TAG#v}"
+          # ADAPTED: Tauri bundle names for productName "Kicks". The version
+          # comes from src-tauri/tauri.conf.json and must match the tag.
+          expected=(
+            "Kicks_${VERSION}_*.AppImage"
+            "Kicks_${VERSION}_*.deb"
+            "Kicks_${VERSION}_*.dmg"
+            "Kicks_${VERSION}_*.msi"
+            "Kicks_${VERSION}_*-setup.exe"
+          )
+          missing=0
+          for pattern in "${expected[@]}"; do
+            matches=( $pattern )
+            if (( ${#matches[@]} == 0 )); then
+              echo "::error::Missing expected asset: $pattern"
+              missing=1
+            else
+              printf 'ok  %-40s %s\n' "$pattern" "${matches[*]}"
+            fi
+          done
+          ls -la
+          exit "$missing"
+
+      - name: Generate and verify SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          rm -f SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort \
+            | xargs -r -d '\n' sha256sum > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Attach assets to draft release
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::Release $RELEASE_TAG is already published; refusing to replace its assets."
+              exit 1
+            fi
+            echo "Draft release $RELEASE_TAG exists; uploading assets (clobber)."
+            gh release upload "$RELEASE_TAG" ./* --clobber
+          else
+            echo "Creating draft release $RELEASE_TAG."
+            gh release create "$RELEASE_TAG" ./* \
+              --draft \
+              --verify-tag \
+              --title "Kicks $RELEASE_TAG" \
+              --generate-notes
+          fi

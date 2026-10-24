@@ -126,7 +126,8 @@ The [`.github/workflows/ci.yml`](.github/workflows/ci.yml) pipeline runs on ever
 | **Quality** | `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --all-features` |
 | **Frontend** | `npm run lint`, `npm run test`, `npm run test:e2e`, `npm run build` |
 | **Security** | `cargo audit` (vulnerability scanning), `cargo deny check` (license/duplicate scanning) |
-| **Release** | Cross-platform matrix build: Linux, macOS (universal), Windows. Uploads artifacts to GitHub Releases. |
+
+Releases are handled separately by [`.github/workflows/release.yml`](.github/workflows/release.yml) (on `v*` tag push, or manually via *Run workflow* with an existing tag). It re-runs the full CI pipeline above on the tag as a gate, then builds the cross-platform bundles: Linux, macOS (universal), Windows.
 
 ### Automated Dependency Updates
 
@@ -218,7 +219,7 @@ git tag -a v0.2.0 -m "Kicks v0.2.0"
 git push origin v0.2.0
 ```
 
-The CI `release` job will automatically build and upload `.AppImage`, `.deb`, `.dmg`, `.msi`, and `.exe` bundles to the GitHub Release page.
+The [Release workflow](.github/workflows/release.yml) gates on CI, builds the `.AppImage`, `.deb`, `.dmg`, `.msi`, and `.exe` bundles, writes `SHA256SUMS`, and attaches everything to a **draft** GitHub Release for the tag. Review the draft and publish it by hand; the workflow never publishes releases or creates tags. To rebuild assets for an existing tag, run the workflow manually with that tag (existing assets are replaced). The version in `src-tauri/tauri.conf.json` must match the tag, or the asset check fails.
 
 ---
 
