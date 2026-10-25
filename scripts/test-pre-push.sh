@@ -154,6 +154,17 @@ git remote set-url --push split "$tmp/pushdest.git"
 expect fail "separate push URL is checked, not the fetch URL" split split-bad
 git remote remove split
 
+# A local replace ref must not mask a bad commit.
+git checkout -q -b replaced "$base"
+bad "replaced bad"
+badc="$(git rev-parse HEAD)"
+git checkout -q -b replacement "$base"
+good "replacement good"
+git replace "$badc" "$(git rev-parse HEAD)"
+git checkout -q replaced
+expect fail "a git replace ref cannot mask a bad commit" origin replaced
+git replace -d "$badc" >/dev/null
+
 # Unreachable remote: new refs are rejected.
 rc=0
 printf 'refs/heads/x %s refs/heads/x %s\n' "$base" "$zero" | bash .githooks/pre-push "$tmp/does-not-exist.git" >/dev/null 2>&1 || rc=$?

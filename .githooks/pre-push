@@ -12,6 +12,8 @@
 #     the push is rejected. If the remote has no default branch yet, the full history
 #     of the pushed commit is checked (fail closed).
 set -euo pipefail
+# Validate the real objects: local `git replace` refs must not mask a commit.
+export GIT_NO_REPLACE_OBJECTS=1
 root="$(git rev-parse --show-toplevel)"
 zero=0000000000000000000000000000000000000000
 remote="${1:-}"
