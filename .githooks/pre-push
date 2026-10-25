@@ -15,12 +15,14 @@ set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 zero=0000000000000000000000000000000000000000
 remote="${1:-}"
+# The push destination (URL) is what git will update; it can differ from the fetch URL.
+dest="${2:-$remote}"
 
 # Print the remote's current default-branch tip sha. Prints nothing if the remote
 # has no HEAD (for example an empty repository). Returns 1 if the remote is unreachable.
 default_tip() {
   local out
-  out="$(git ls-remote "$remote" HEAD </dev/null 2>/dev/null)" || return 1
+  out="$(git ls-remote "$dest" HEAD </dev/null 2>/dev/null)" || return 1
   awk '$2 == "HEAD" { print $1; exit }' <<<"$out"
 }
 

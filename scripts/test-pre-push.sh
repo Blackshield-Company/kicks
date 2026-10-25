@@ -142,6 +142,18 @@ git init -q --bare -b main "$tmp/empty2.git"
 git checkout -q -b empty-bad "$stale"
 expect fail "empty remote, bad commit in history fails" "$tmp/empty2.git" empty-bad
 
+# A separate push URL is the destination that counts, not the fetch URL.
+git init -q --bare -b main "$tmp/pushdest.git"
+git push -q "$tmp/pushdest.git" "$base:refs/heads/main" >/dev/null 2>&1
+git init -q --bare -b main "$tmp/fetchside.git"
+git checkout -q -b split-bad "$base"
+bad "split url bad"
+git push -q --no-verify "$tmp/fetchside.git" "HEAD:refs/heads/main" >/dev/null 2>&1
+git remote add split "$tmp/fetchside.git"
+git remote set-url --push split "$tmp/pushdest.git"
+expect fail "separate push URL is checked, not the fetch URL" split split-bad
+git remote remove split
+
 # Unreachable remote: new refs are rejected.
 rc=0
 printf 'refs/heads/x %s refs/heads/x %s\n' "$base" "$zero" | bash .githooks/pre-push "$tmp/does-not-exist.git" >/dev/null 2>&1 || rc=$?
