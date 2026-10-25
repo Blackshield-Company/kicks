@@ -16,3 +16,5 @@ jobs:
         run: bash scripts/check-noreply.sh "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
       - name: Test the check
         run: bash scripts/test-check-noreply.sh
+      - name: Test the pre-push hook
+        run: bash scripts/test-pre-push.sh

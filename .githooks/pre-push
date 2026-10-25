@@ -1,16 +1,46 @@
 #!/usr/bin/env bash
 # Rejects pushes containing commits not authored/committed with the noreply email.
 # Enable with: git config core.hooksPath .githooks
+#
+# Git passes one line per ref update on stdin: <local ref> <local sha> <remote ref> <remote sha>.
+# The pushed range is derived from that update, never from local tracking refs
+# that may be stale:
+#   - existing remote ref: check <remote sha>..<local sha>
+#   - new remote ref (remote sha is all zeros): check the commits not reachable from
+#     the remote's default branch (refs/remotes/<remote>/HEAD, else main, else master).
+#     If no default-branch ref is available, the whole history of the pushed commit is
+#     checked (fail closed). Run `git remote set-head <remote> --auto` to set it.
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 zero=0000000000000000000000000000000000000000
-remote="$1"
+remote="${1:-}"
+
+# Print the remote's default-branch tracking ref, or return 1 if there is none.
+default_ref() {
+  local ref
+  if ref="$(git symbolic-ref -q "refs/remotes/$remote/HEAD" 2>/dev/null)" \
+     && git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
+    echo "$ref"; return 0
+  fi
+  for ref in "refs/remotes/$remote/main" "refs/remotes/$remote/master"; do
+    if git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
+      echo "$ref"; return 0
+    fi
+  done
+  return 1
+}
+
+# shellcheck disable=SC2034  # rref is part of the stdin format but unused
 while read -r lref lsha rref rsha; do
   [ "$lsha" = "$zero" ] && continue          # branch deletion
   if [ "$rsha" = "$zero" ]; then
-    # New branch: check commits not already on this remote's tracking refs.
-    # Run `git fetch` first if tracking refs are stale or missing.
-    "$root/scripts/check-noreply.sh" "$lsha" --not "--remotes=$remote"
+    # New remote ref: exclude only the default branch, not every tracking ref.
+    if base="$(default_ref)"; then
+      "$root/scripts/check-noreply.sh" "$lsha" --not "$base"
+    else
+      echo "pre-push: no default branch ref for '$remote'; checking the full history of $lref" >&2
+      "$root/scripts/check-noreply.sh" "$lsha"
+    fi
   else
     if ! git cat-file -e "$rsha^{commit}" 2>/dev/null; then
       echo "pre-push: remote tip $rsha not present locally; run 'git fetch $remote' and retry" >&2
