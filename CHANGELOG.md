@@ -4,6 +4,10 @@ All notable changes to Kicks Guitar Workstation will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The minimum supported Rust version is now 1.90; the CI minimum-version check job builds with Rust 1.90.
+
 ## [0.2.0] — 2026-10-23
 
 This release makes the real-time audio path safe, adds a full set of workstation pedals and DI recording, and tightens file access and the webview security model.

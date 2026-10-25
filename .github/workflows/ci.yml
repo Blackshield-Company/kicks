@@ -70,10 +70,10 @@ jobs:
         run: cargo test --all-features
 
   msrv:
-    name: Rust — MSRV 1.89 build
+    name: Rust — MSRV 1.90 build
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: "1.89"
+      RUSTUP_TOOLCHAIN: "1.90"
 
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +81,7 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.89
+        uses: dtolnay/rust-toolchain@1.90
 
       - name: Install system dependencies
         run: |
