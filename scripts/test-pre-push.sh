@@ -17,6 +17,8 @@ git init -q --bare -b main "$tmp/remote.git"
 git init -q -b main "$tmp/work"
 cd "$tmp/work"
 git config commit.gpgsign false
+git config user.name synthalorian
+git config user.email "$OK"
 git config core.hooksPath .githooks
 mkdir -p .githooks scripts
 cp "$src/.githooks/pre-push" .githooks/pre-push
@@ -76,22 +78,96 @@ good "good on top of stale"
 expect fail "new branch containing a commit from a stale tracking ref fails" origin new-on-stale
 git update-ref -d refs/remotes/origin/stale-leftover
 
+# A stale default-branch tracking ref (remote was rewound) must not hide it either.
+git update-ref refs/remotes/origin/main "$stale"
+git checkout -q -b new-on-stale-main "$stale"
+expect fail "new branch containing a commit from a rewound origin/main fails" origin new-on-stale-main
+git update-ref refs/remotes/origin/main "$base"
+
+# A remote HEAD pointing at the pushed branch cannot exclude its history.
+git checkout -q -b head-trick "$base"
+bad "bad commit behind a remote HEAD trick"
+git update-ref refs/remotes/origin/head-trick HEAD
+git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/head-trick
+expect fail "remote HEAD pointing at the pushed branch cannot hide commits" origin head-trick
+git update-ref -d refs/remotes/origin/head-trick
+git remote set-head origin main >/dev/null
+
 # Dependabot-style commits on a new branch are exempt.
 git checkout -q -b dep "$base"
 dependabot "bump dep"
 expect pass "new branch with a dependabot commit passes" origin dep
 
-# Missing default-branch ref: fail closed on the whole history.
-git checkout -q -b nodefault "$base"
-good "nodefault good"
-git symbolic-ref -d refs/remotes/origin/HEAD
-git update-ref -d refs/remotes/origin/main
-git checkout -q -b nodefault-clean-hist "$base"
-expect pass "no default ref, clean history passes" origin nodefault-clean-hist
-git checkout -q -b nodefault-bad "$stale"
-expect fail "no default ref, bad commit in history fails" origin nodefault-bad
+# Tags are new refs: checked against the default branch too.
+git checkout -q -b tagged "$base"
+bad "tagged bad"
+git tag -a bad-tag -m "bad tag"
+expect fail "new tag on a bad commit fails" origin bad-tag
+git checkout -q "$base"
+git tag -a good-tag -m "good tag"
+expect pass "new tag on a good commit passes" origin good-tag
+
+# Remote given as a URL (no tracking refs at all).
+git checkout -q -b by-url "$base"
+bad "by url bad"
+expect fail "push to a URL with a bad commit fails" "$tmp/remote.git" by-url
+git checkout -q -b by-url-good "$base"
+good "by url good"
+expect pass "push to a URL with a good commit passes" "$tmp/remote.git" by-url-good
+
+# Force updates check the range from the real remote tip.
+git checkout -q -b forced "$base"
+good "forced 1"
+git push -q origin forced >/dev/null 2>&1
+git reset -q --hard "$base"
+bad "forced bad"
+expect fail "force push with a bad commit fails" --force origin forced
+git reset -q --hard "$base"
+good "forced good"
+expect pass "force push with a good commit passes" --force origin forced
+
+# A bad ref anywhere in a multi-ref push rejects the whole push.
+git checkout -q -b multi-good "$base"
+good "multi good"
+git checkout -q -b multi-bad "$base"
+bad "multi bad"
+expect fail "multi-ref push with one bad ref fails" origin multi-good multi-bad
+if on_remote refs/heads/multi-good; then echo "FAIL - good ref reached the remote in a rejected push"; fails=$((fails + 1)); fi
+
+# Remote with no default branch: fail closed on the whole history.
+git init -q --bare -b main "$tmp/empty.git"
+git checkout -q -b empty-clean "$base"
+expect pass "empty remote, clean history passes" "$tmp/empty.git" empty-clean
+git init -q --bare -b main "$tmp/empty2.git"
+git checkout -q -b empty-bad "$stale"
+expect fail "empty remote, bad commit in history fails" "$tmp/empty2.git" empty-bad
+
+# Unreachable remote: new refs are rejected.
+rc=0
+printf 'refs/heads/x %s refs/heads/x %s\n' "$base" "$zero" | bash .githooks/pre-push "$tmp/does-not-exist.git" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then echo "ok   - unreachable remote rejects a new ref"; else echo "FAIL - unreachable remote (exit $rc)"; fails=$((fails + 1)); fi
+
+# Default branch tip missing locally is rejected with a clear message.
+git --git-dir="$tmp/remote.git" update-ref refs/heads/main "$(git --git-dir="$tmp/remote.git" rev-parse main)"
+git clone -q "$tmp/remote.git" "$tmp/clone2"
+(
+  cd "$tmp/clone2"
+  git config commit.gpgsign false
+  git config user.name synthalorian
+  git config user.email "$OK"
+  git commit -q --allow-empty -m "elsewhere"
+  git push -q origin main >/dev/null 2>&1
+)
+git checkout -q -b behind "$base"
+good "behind good"
+rc=0
+out="$(printf 'refs/heads/behind %s refs/heads/behind %s\n' "$(git rev-parse HEAD)" "$zero" | bash .githooks/pre-push origin 2>&1)" || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "not present locally" <<<"$out"; then
+  echo "ok   - default tip missing locally is rejected"
+else
+  echo "FAIL - default tip missing locally (exit $rc)"; fails=$((fails + 1))
+fi
 git fetch -q origin
-git remote set-head origin main >/dev/null
 
 # Branch deletion is not checked.
 expect pass "branch deletion passes" origin --delete feature
