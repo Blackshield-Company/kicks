@@ -7,7 +7,7 @@ license.workspace = true
 repository = "https://github.com/Blackshield-Company/kicks"
 homepage = "https://github.com/Blackshield-Company/kicks"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.90"
 
 [lib]
 name = "app_lib"
