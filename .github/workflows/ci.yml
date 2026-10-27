@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -76,7 +76,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.90"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -120,7 +120,7 @@ jobs:
         working-directory: frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -155,7 +155,7 @@ jobs:
     needs: [quality]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
