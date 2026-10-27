@@ -168,7 +168,7 @@ jobs:
           workspaces: "src-tauri -> target\ncrates/kicks-core -> target\ncrates/kicks-dsp -> target"
 
       - name: Cache cargo tools
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin
           key: ${{ runner.os }}-cargo-tools-${{ hashFiles('**/Cargo.lock') }}
