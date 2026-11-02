@@ -1,57 +1,65 @@
 version: 2
 updates:
-  # Rust / Cargo dependencies
-  - package-ecosystem: cargo
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: chore(deps)
-    labels:
-      - dependencies
-      - rust
-    groups:
-      minor-patch:
-        patterns:
-          - '*'
-        update-types:
-          - minor
-          - patch
-
-  # Frontend / npm dependencies
-  - package-ecosystem: npm
-    directory: /frontend
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: chore(deps)
-    labels:
-      - dependencies
-      - frontend
-    groups:
-      minor-patch:
-        patterns:
-          - '*'
-        update-types:
-          - minor
-          - patch
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "chore(deps)"
-    groups:
-      github-actions-minor-patch:
-        applies-to: version-updates
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
+- package-ecosystem: cargo
+  directory: /
+  schedule:
+    day: monday
+    interval: weekly
+  open-pull-requests-limit: 5
+  groups:
+    cargo-minor-patch:
+      patterns:
+      - "*"
+      update-types:
+      - minor
+      - patch
+  ignore:
+  - dependency-name: "*"
+    update-types:
+    - "version-update:semver-major"
+  commit-message:
+    prefix: chore(deps)
+  labels:
+  - dependencies
+  - rust
+- package-ecosystem: npm
+  directory: /frontend
+  schedule:
+    day: monday
+    interval: weekly
+  open-pull-requests-limit: 5
+  groups:
+    npm-minor-patch:
+      patterns:
+      - "*"
+      update-types:
+      - minor
+      - patch
+  ignore:
+  - dependency-name: "*"
+    update-types:
+    - "version-update:semver-major"
+  commit-message:
+    prefix: chore(deps)
+  labels:
+  - dependencies
+  - frontend
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    day: monday
+    interval: weekly
+  open-pull-requests-limit: 5
+  groups:
+    github-actions-minor-patch:
+      patterns:
+      - "*"
+      update-types:
+      - minor
+      - patch
+  ignore:
+  - dependency-name: "*"
+    update-types:
+    - "version-update:semver-major"
+  commit-message:
+    prefix: chore(deps)
